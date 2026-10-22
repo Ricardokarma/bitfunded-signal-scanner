@@ -1,40 +1,7 @@
-# Bitfunded Signal Scanner Pro
-
-A stronger, more disciplined crypto scanner for Bitfunded-style challenges.
-
-## Overview
-
-This app scans active USDT futures markets, ranks the strongest Long and Short setups, and helps limit emotional overtrading. It is designed to support manual execution only.
-
-## Included features
-
-- automatic scan of active futures pairs
-- 15m + 1h multi-timeframe confirmation
-- EMA, RSI, MACD, ADX, ATR, and volume checks
-- directional signal scoring from 0 to 100
-- confidence and estimated win-rate output
-- BTC dominance context
-- funding and open-interest context
-- manual trade journal
-- challenge risk controls and execution checklist
-
-## Local setup
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-streamlit run app.py
-```
-
-## Important note
-
-This app is for educational and decision-support purposes only. It does not guarantee profit and does not place trades automatically.
-
-## Repository
-
-https://github.com/Ricardokarma/bitfunded-signal-scanner
-
-## Direct ZIP download
-
-https://github.com/Ricardokarma/bitfunded-signal-scanner/archive/refs/heads/main.zip
+account_size: 10000
+risk_per_trade_pct: 0.75
+daily_loss_limit_pct: 4.0
+max_loss_limit_pct: 6.0
+max_open_positions: 2
+min_hold_minutes: 12
+pairs: []
