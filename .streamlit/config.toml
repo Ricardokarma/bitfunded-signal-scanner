@@ -1,8 +1,9 @@
-streamlit>=1.39.0
-ccxt>=4.4.0
-pandas>=2.2.0
-numpy>=1.26.0
-pandas-ta>=0.3.14b
-pyyaml>=6.0
-plotly>=5.24.0
-requests>=2.32.0
+[theme]
+base = "dark"
+primaryColor = "#00ff88"
+backgroundColor = "#0e1117"
+secondaryBackgroundColor = "#1a1f2e"
+textColor = "#fafafa"
+
+[server]
+headless = true
