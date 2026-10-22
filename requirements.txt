@@ -1,8 +1,30 @@
-streamlit>=1.39.0
-ccxt>=4.4.0
-pandas>=2.2.0
-numpy>=1.26.0
-pandas-ta>=0.3.14b
-pyyaml>=6.0
-plotly>=5.24.0
-requests>=2.32.0
+account_size: 10000
+daily_loss_limit_pct: 4.0
+max_loss_limit_pct: 6.0
+max_open_positions: 5
+risk_per_trade_pct: 0.75
+min_hold_minutes: 12
+
+pairs:
+  - BTC/USDT
+  - ETH/USDT
+  - SOL/USDT
+  - BNB/USDT
+  - XRP/USDT
+  - DOGE/USDT
+  - ADA/USDT
+  - AVAX/USDT
+  - LINK/USDT
+  - SUI/USDT
+  - NEAR/USDT
+  - LTC/USDT
+  - DOT/USDT
+
+mode_defaults:
+  Scalp:
+    min_score: 58
+  Swing:
+    min_score: 62
+  Challenge:
+    min_score: 68
+

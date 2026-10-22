@@ -1,73 +1,519 @@
-# Bitfunded Signal Scanner Pro
+import os
+from datetime import datetime
 
-A stronger, more disciplined crypto scanner for Bitfunded-style challenge trading.
+import ccxt
+import pandas as pd
+import pandas_ta as ta
+import plotly.graph_objects as go
+import requests
+import streamlit as st
+import yaml
 
-## What it does
+st.set_page_config(page_title="Bitfunded Signal Scanner Pro", page_icon="📈", layout="wide")
 
-This app scans active USDT futures markets dynamically, filters them by quality, and ranks the best Long and Short setups using:
-- EMA alignment
-- RSI momentum checks
-- MACD confirmation
-- ADX trend validation
-- ATR-based volatility control
-- trend and volume filtering
-- funding-rate and open-interest checks
-- BTC dominance context
-- multi-timeframe scoring
+JOURNAL_PATH = "trades_journal.csv"
 
-It also includes:
-- dynamic full-market scan instead of a fixed watchlist
-- score and confidence ranking
-- expected win-rate estimate
-- challenge-specific risk controls
-- manual trade journal for real-world feedback
 
-## Recommended use
+@st.cache_data(ttl=60)
+def load_config():
+    with open("config.yaml", "r", encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
 
-This is designed for:
-- scalp trades
-- short-to-medium-term swing trades
-- manual execution only
 
-Use it as a decision-support tool and keep risk disciplined.
+config = load_config()
 
-## Run locally
 
-1. Create a virtual environment
-   ```bash
-   python -m venv .venv
-   source .venv/bin/activate
-   ```
+@st.cache_resource
+def get_exchange():
+    return ccxt.binanceusdm({
+        "enableRateLimit": True,
+        "options": {"defaultType": "future"},
+    })
 
-2. Install dependencies
-   ```bash
-   pip install -r requirements.txt
-   ```
 
-3. Start the app
-   ```bash
-   streamlit run app.py
-   ```
+def safe_float(value, default=0.0):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
 
-4. Open the local URL shown in the terminal.
 
-## Files
+@st.cache_data(ttl=60)
+def fetch_btc_dominance():
+    try:
+        response = requests.get("https://api.coingecko.com/api/v3/global", timeout=10)
+        response.raise_for_status()
+        market_caps = response.json().get("data", {}).get("market_cap_percentage", {})
+        return safe_float(market_caps.get("btc", 0.0), 0.0)
+    except Exception:
+        return None
 
-- `app.py` — dynamic market scanner and dashboard
-- `config.yaml` — challenge settings and scan configuration
-- `requirements.txt` — Python dependencies
-- `trades_journal.csv` — optional manual trade log
 
-## Important note
+@st.cache_data(ttl=15)
+def fetch_ticker(symbol):
+    exchange = get_exchange()
+    try:
+        ticker = exchange.fetch_ticker(symbol)
+        return {
+            "last": safe_float(ticker.get("last"), 0.0),
+            "change": safe_float(ticker.get("percentage"), 0.0),
+            "baseVolume": safe_float(ticker.get("baseVolume"), 0.0),
+            "quoteVolume": safe_float(ticker.get("quoteVolume"), 0.0),
+            "bid": safe_float(ticker.get("bid"), 0.0),
+            "ask": safe_float(ticker.get("ask"), 0.0),
+        }
+    except Exception:
+        return {"last": 0.0, "change": 0.0, "baseVolume": 0.0, "quoteVolume": 0.0, "bid": 0.0, "ask": 0.0}
 
-This project is for education and manual trading support only.
-It does not guarantee profits and does not place trades automatically.
-The confidence and win-rate numbers are model-based estimates, not guaranteed outcomes.
 
-## Repository
+@st.cache_data(ttl=30)
+def fetch_ohlcv(symbol, timeframe="15m", limit=220):
+    exchange = get_exchange()
+    try:
+        bars = exchange.fetch_ohlcv(symbol=symbol, timeframe=timeframe, limit=limit)
+        df = pd.DataFrame(bars, columns=["timestamp", "open", "high", "low", "close", "volume"])
+        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
+        df.set_index("timestamp", inplace=True)
+        return df.sort_index()
+    except Exception:
+        return pd.DataFrame()
 
-https://github.com/Ricardokarma/bitfunded-signal-scanner
 
-## ZIP download
+@st.cache_data(ttl=30)
+def fetch_funding_and_oi(symbol):
+    exchange = get_exchange()
+    result = {"fundingRate": 0.0, "openInterest": 0.0, "longShortRatio": 0.0}
 
-https://github.com/Ricardokarma/bitfunded-signal-scanner/archive/refs/heads/main.zip
+    try:
+        funding = exchange.fetch_funding_rate(symbol)
+        result["fundingRate"] = safe_float(funding.get("fundingRate"), 0.0) * 100
+    except Exception:
+        pass
+
+    try:
+        stats = exchange.fetch_open_interest(symbol)
+        result["openInterest"] = safe_float(stats.get("openInterest"), 0.0)
+    except Exception:
+        pass
+
+    try:
+        long_short = exchange.fetch_long_short_ratio(symbol=symbol)
+        if isinstance(long_short, dict):
+            ratio = next(iter(long_short.values()), 0.0)
+            result["longShortRatio"] = safe_float(ratio, 0.0)
+    except Exception:
+        pass
+
+    return result
+
+
+@st.cache_data(ttl=180)
+def get_active_pairs():
+    exchange = get_exchange()
+    try:
+        markets = exchange.load_markets()
+    except Exception:
+        return []
+
+    valid = []
+    for symbol, market in markets.items():
+        if not market.get("active", False):
+            continue
+        if market.get("quote") != "USDT":
+            continue
+        if market.get("type") not in ("future", "swap"):
+            continue
+        if "/USDT" not in symbol:
+            continue
+        valid.append(symbol)
+
+    unique = sorted(set(valid))
+    return unique
+
+
+def add_indicators(df):
+    if df.empty:
+        return df
+
+    out = df.copy()
+    out["ema_9"] = ta.ema(out["close"], length=9)
+    out["ema_21"] = ta.ema(out["close"], length=21)
+    out["ema_50"] = ta.ema(out["close"], length=50)
+    out["rsi"] = ta.rsi(out["close"], length=14)
+    out["atr"] = ta.atr(out["high"], out["low"], out["close"], length=14)
+    out["adx"] = ta.adx(out["high"], out["low"], out["close"], length=14)
+    out["volume_sma"] = out["volume"].rolling(window=20).mean()
+
+    macd = ta.macd(out["close"], fast=12, slow=26, signal=9)
+    if isinstance(macd, pd.DataFrame):
+        for column in macd.columns:
+            out[column] = macd[column]
+
+    return out
+
+
+def compute_regime(df):
+    if df.empty:
+        return "RANGE"
+
+    last = df.iloc[-1]
+    ema_9 = safe_float(last.get("ema_9"))
+    ema_21 = safe_float(last.get("ema_21"))
+    ema_50 = safe_float(last.get("ema_50"))
+    adx = safe_float(last.get("adx"), 0.0)
+
+    if ema_9 > ema_21 > ema_50 and adx > 25:
+        return "TRENDING_UP"
+    if ema_9 < ema_21 < ema_50 and adx > 25:
+        return "TRENDING_DOWN"
+    return "RANGE"
+
+
+def score_setup(df, mode):
+    if df.empty:
+        return {
+            "direction": "NEUTRAL",
+            "score": 0.0,
+            "confidence": 0.0,
+            "win_rate": 0.0,
+            "reasons": ["No data"],
+            "price": 0.0,
+            "atr": 0.0,
+            "rsi": 0.0,
+            "atr_pct": 0.0,
+            "regime": "RANGE",
+        }
+
+    mode_profile = {
+        "Scalp": {"trend_weight": 1.2, "momentum_weight": 1.3, "volume_weight": 1.4, "min_score": 58},
+        "Swing": {"trend_weight": 1.35, "momentum_weight": 1.15, "volume_weight": 1.1, "min_score": 62},
+        "Challenge": {"trend_weight": 1.45, "momentum_weight": 1.05, "volume_weight": 1.0, "min_score": 68},
+    }
+    profile = mode_profile.get(mode, mode_profile["Challenge"])
+
+    last = df.iloc[-1]
+    bullish_score = 0
+    bearish_score = 0
+    reasons = []
+
+    ema_9 = safe_float(last.get("ema_9"))
+    ema_21 = safe_float(last.get("ema_21"))
+    ema_50 = safe_float(last.get("ema_50"))
+    rsi = safe_float(last.get("rsi"), 50)
+    adx = safe_float(last.get("adx"), 0.0)
+    price = safe_float(last.get("close"), 0.0)
+    atr = safe_float(last.get("atr"), 0.0)
+    atr_pct = ((atr / price) * 100) if price > 0 and atr > 0 else 0.0
+
+    if ema_9 > ema_21 > ema_50:
+        bullish_score += 22 * profile["trend_weight"]
+        reasons.append("Bullish EMA stack")
+    elif ema_9 < ema_21 < ema_50:
+        bearish_score += 22 * profile["trend_weight"]
+        reasons.append("Bearish EMA stack")
+
+    if 55 <= rsi <= 70:
+        bullish_score += 18 * profile["momentum_weight"]
+        reasons.append("RSI bullish")
+    elif 30 <= rsi <= 45:
+        bearish_score += 18 * profile["momentum_weight"]
+        reasons.append("RSI bearish")
+    elif rsi > 70:
+        bullish_score += 10 * profile["momentum_weight"]
+        reasons.append("Strong bullish momentum")
+    elif rsi < 30:
+        bearish_score += 10 * profile["momentum_weight"]
+        reasons.append("Strong bearish momentum")
+
+    macd_value = safe_float(last.get("MACD_12_26_9"))
+    signal_value = safe_float(last.get("MACDs_12_26_9"))
+    if macd_value > signal_value:
+        bullish_score += 14 * profile["momentum_weight"]
+        reasons.append("MACD above signal")
+    elif macd_value < signal_value:
+        bearish_score += 14 * profile["momentum_weight"]
+        reasons.append("MACD below signal")
+
+    if adx >= 25:
+        if price > ema_21:
+            bullish_score += 12 * profile["trend_weight"]
+            reasons.append("ADX trend confirmation")
+        else:
+            bearish_score += 12 * profile["trend_weight"]
+            reasons.append("ADX trend rejection")
+
+    volume = safe_float(last.get("volume"), 0.0)
+    volume_sma = safe_float(last.get("volume_sma"), 0.0)
+    if volume_sma > 0:
+        if volume > volume_sma * 1.2:
+            bullish_score += 12 * profile["volume_weight"]
+            reasons.append("Volume expansion")
+        elif volume < volume_sma * 0.8:
+            bearish_score += 12 * profile["volume_weight"]
+            reasons.append("Weak volume")
+
+    score = max(bullish_score, bearish_score) + abs(bullish_score - bearish_score) * 0.5
+    score = round(min(100.0, score), 1)
+
+    if bullish_score > bearish_score and score >= profile["min_score"]:
+        direction = "LONG"
+    elif bearish_score > bullish_score and score >= profile["min_score"]:
+        direction = "SHORT"
+    else:
+        direction = "NEUTRAL"
+
+    confidence = min(99.0, 48 + score * 0.52) if direction in ["LONG", "SHORT"] else 0.0
+    win_rate = max(35.0, min(78.0, 50 + (score - 50) * 0.55)) if direction in ["LONG", "SHORT"] else 0.0
+
+    return {
+        "direction": direction,
+        "score": score,
+        "confidence": round(confidence, 1),
+        "win_rate": round(win_rate, 1),
+        "reasons": reasons if reasons else ["Weak setup"],
+        "price": price,
+        "atr": atr,
+        "rsi": rsi,
+        "atr_pct": round(atr_pct, 2),
+        "regime": compute_regime(df),
+    }
+
+
+def build_signal(symbol, mode):
+    setups = []
+    for tf in ["15m", "1h"]:
+        df = fetch_ohlcv(symbol, timeframe=tf, limit=220)
+        if df.empty:
+            continue
+        prepared = add_indicators(df)
+        signal = score_setup(prepared, mode)
+        signal["timeframe"] = tf
+        setups.append(signal)
+
+    if not setups:
+        return {"direction": "NEUTRAL", "score": 0.0, "confidence": 0.0, "win_rate": 0.0, "reasons": ["No data"], "timeframes": []}
+
+    weighted = []
+    for item in setups:
+        weighted.append(item["score"])
+
+    overall_score = round(sum(weighted) / len(weighted), 1)
+    long_votes = sum(1 for item in setups if item["direction"] == "LONG")
+    short_votes = sum(1 for item in setups if item["direction"] == "SHORT")
+
+    if long_votes >= short_votes and overall_score >= 58:
+        direction = "LONG"
+    elif short_votes > long_votes and overall_score >= 58:
+        direction = "SHORT"
+    else:
+        direction = "NEUTRAL"
+
+    reasons = []
+    for item in setups:
+        reasons.extend(item["reasons"])
+
+    confidence = min(99.0, 45 + overall_score * 0.55) if direction in ["LONG", "SHORT"] else 0.0
+    win_rate = max(35.0, min(78.0, 50 + (overall_score - 50) * 0.55)) if direction in ["LONG", "SHORT"] else 0.0
+
+    return {
+        "direction": direction,
+        "score": overall_score,
+        "confidence": round(confidence, 1),
+        "win_rate": round(win_rate, 1),
+        "reasons": reasons[:6],
+        "timeframes": [item["timeframe"] for item in setups],
+    }
+
+
+@st.cache_data(ttl=30)
+def scan_market(mode):
+    pair_list = config.get("pairs") or []
+    if not pair_list:
+        pair_list = get_active_pairs()
+    if isinstance(pair_list, str):
+        pair_list = [pair_list]
+
+    rows = []
+    for symbol in pair_list:
+        signal = build_signal(symbol, mode)
+        if signal["direction"] == "NEUTRAL":
+            continue
+        if signal["score"] < 58:
+            continue
+
+        ticker = fetch_ticker(symbol)
+        funding = fetch_funding_and_oi(symbol)
+        rows.append(
+            {
+                "Symbol": symbol.replace("/USDT", ""),
+                "Direction": signal["direction"],
+                "Score": signal["score"],
+                "Confidence": signal["confidence"],
+                "Win Rate": signal["win_rate"],
+                "Price": ticker.get("last", 0.0),
+                "24h %": ticker.get("change", 0.0),
+                "Volume": ticker.get("quoteVolume", 0.0),
+                "Funding %": funding.get("fundingRate", 0.0),
+                "OI": funding.get("openInterest", 0.0),
+                "Reasons": " • ".join(signal["reasons"]),
+                "Timeframes": ", ".join(signal["timeframes"]),
+            }
+        )
+
+    return sorted(rows, key=lambda item: item["Score"], reverse=True)
+
+
+def load_journal():
+    if not os.path.exists(JOURNAL_PATH):
+        return pd.DataFrame(columns=["timestamp", "symbol", "direction", "entry", "exit", "result", "notes"])
+    return pd.read_csv(JOURNAL_PATH)
+
+
+def save_trade_to_journal(symbol, direction, entry, exit_price, result, notes):
+    df = load_journal()
+    new_row = {
+        "timestamp": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+        "symbol": symbol,
+        "direction": direction,
+        "entry": entry,
+        "exit": exit_price,
+        "result": result,
+        "notes": notes,
+    }
+    df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+    df.to_csv(JOURNAL_PATH, index=False)
+
+
+st.title("📈 Bitfunded Signal Scanner Pro")
+st.caption("Risk-aware market scanner built for manual execution, multi-timeframe confirmation, and challenge discipline.")
+
+btc_dom = fetch_btc_dominance()
+
+col1, col2, col3, col4 = st.columns(4)
+with col1:
+    st.metric("Account size", f"${config.get('account_size', 0):,}")
+with col2:
+    st.metric("Risk / trade", f"{config.get('risk_per_trade_pct', 0)}%")
+with col3:
+    st.metric("Daily loss", f"{config.get('daily_loss_limit_pct', 0)}%")
+with col4:
+    st.metric("BTC Dominance", f"{btc_dom:.1f}%" if btc_dom is not None else "N/A")
+
+st.divider()
+
+with st.sidebar:
+    st.header("Controls")
+    mode = st.radio("Trade mode", options=["Scalp", "Swing", "Challenge"], index=2)
+    min_score = st.slider("Minimum score", min_value=50, max_value=85, value=58)
+    if st.button("Refresh scan"):
+        st.cache_data.clear()
+        st.rerun()
+
+    st.markdown(
+        f"""
+        - Max open positions: {config.get('max_open_positions', 0)}
+        - Min hold: {config.get('min_hold_minutes', 12)} min
+        - Max loss cap: {config.get('max_loss_limit_pct', 0)}%
+        """
+    )
+
+results = scan_market(mode)
+results = [row for row in results if row["Score"] >= min_score]
+
+if results:
+    df = pd.DataFrame(results)
+    st.subheader("Scanner results")
+    st.dataframe(
+        df,
+        use_container_width=True,
+        column_config={
+            "Score": st.column_config.ProgressColumn("Score", min_value=0, max_value=100, format="%.1f"),
+            "Confidence": st.column_config.ProgressColumn("Confidence", min_value=0, max_value=100, format="%.1f"),
+            "Win Rate": st.column_config.ProgressColumn("Win Rate", min_value=0, max_value=100, format="%.1f"),
+            "Price": st.column_config.NumberColumn(format="%.4f"),
+            "24h %": st.column_config.NumberColumn(format="%.2f"),
+            "Funding %": st.column_config.NumberColumn(format="%.4f"),
+        },
+    )
+
+    selected_symbol = st.selectbox("Inspect symbol", df["Symbol"].unique())
+    selected_tf = st.selectbox("Timeframe", ["15m", "1h"])
+    symbol = f"{selected_symbol}/USDT"
+
+    chart_df = fetch_ohlcv(symbol, timeframe=selected_tf, limit=220)
+    if not chart_df.empty:
+        chart_df = add_indicators(chart_df)
+        fig = go.Figure()
+        fig.add_trace(go.Candlestick(
+            x=chart_df.index,
+            open=chart_df["open"],
+            high=chart_df["high"],
+            low=chart_df["low"],
+            close=chart_df["close"],
+            name=symbol,
+        ))
+        fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df["ema_9"], mode="lines", name="EMA 9"))
+        fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df["ema_21"], mode="lines", name="EMA 21"))
+        fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df["ema_50"], mode="lines", name="EMA 50"))
+        fig.update_layout(title=f"{symbol} {selected_tf}", xaxis_rangeslider_visible=False)
+        st.plotly_chart(fig, use_container_width=True)
+
+    row = df[df["Symbol"] == selected_symbol].iloc[0]
+    price = safe_float(row.get("Price"))
+    atr_estimate = max(price * 0.003, 0.01)
+    pos_size = round((safe_float(config.get("account_size")) * (safe_float(config.get("risk_per_trade_pct")) / 100)) / (atr_estimate * 1.5), 4)
+    st.info(
+        f"{row['Direction']} setup on {selected_symbol}/USDT | Score {row['Score']} | Confidence {row['Confidence']}% | Estimated win rate {row['Win Rate']}% | Suggested size {pos_size} units"
+    )
+else:
+    st.warning("No quality setups meet this mode’s filter. Try lowering the minimum score or wait for a stronger trend setup.")
+
+st.divider()
+
+st.subheader("Manual trade journal")
+with st.form("journal_form"):
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        journal_symbol = st.text_input("Symbol", value="BTC/USDT")
+    with c2:
+        journal_direction = st.selectbox("Direction", ["LONG", "SHORT"])
+    with c3:
+        journal_entry = st.number_input("Entry", value=0.0, format="%.4f")
+
+    c4, c5, c6 = st.columns(3)
+    with c4:
+        journal_exit = st.number_input("Exit", value=0.0, format="%.4f")
+    with c5:
+        journal_result = st.number_input("Result %", value=0.0, format="%.2f")
+    with c6:
+        journal_notes = st.text_input("Notes", value="")
+
+    submitted = st.form_submit_button("Save trade")
+    if submitted:
+        symbol_text = journal_symbol.strip()
+        if symbol_text:
+            save_trade_to_journal(symbol_text, journal_direction, journal_entry, journal_exit, journal_result, journal_notes)
+            st.success(f"Trade saved for {symbol_text}.")
+
+journal_df = load_journal()
+if not journal_df.empty:
+    st.dataframe(journal_df.tail(10), use_container_width=True)
+else:
+    st.caption("No journal entries yet.")
+
+st.divider()
+
+st.subheader("Execution checklist")
+st.markdown(
+    """
+    - Confirm the market regime supports the signal
+    - Check that the token remains liquid and not manipulated
+    - Respect challenge risk rules and max exposure
+    - Validate the signal on both 15m and 1h context
+    - Only execute after the setup still makes sense on live price action
+    - Record each trade result to improve future filtering
+    """
+)
+
+st.info("This tool is designed for manual execution support only. It does not guarantee future profit or success, and the confidence / projected win-rate values are model-based estimates, not certainties.")
+
