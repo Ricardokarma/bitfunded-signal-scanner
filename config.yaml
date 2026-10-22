@@ -1,0 +1,21 @@
+account_size: 10000
+daily_loss_limit_pct: 4.0
+max_loss_limit_pct: 6.0
+max_open_positions: 5
+risk_per_trade_pct: 0.75
+min_hold_minutes: 12
+
+pairs:
+  BTC/USDT: USDT
+  ETH/USDT: USDT
+  SOL/USDT: USDT
+  BNB/USDT: USDT
+  XRP/USDT: USDT
+  DOGE/USDT: USDT
+  ADA/USDT: USDT
+  AVAX/USDT: USDT
+  LINK/USDT: USDT
+  SUI/USDT: USDT
+
+timeframes:
+  - 15m
