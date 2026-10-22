@@ -11,7 +11,8 @@ st.set_page_config(page_title="Bitfunded Signal Scanner", page_icon="📈", layo
 @st.cache_data
 def load_config():
     with open("config.yaml", "r", encoding="utf-8") as f:
-        return yaml.safe_load(f) or {}
+        data = yaml.safe_load(f) or {}
+    return data
 
 
 config = load_config()
@@ -25,19 +26,27 @@ def get_exchange():
     })
 
 
+def safe_number(value, default=0.0):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
 def fetch_ohlcv(symbol, timeframe="15m", limit=220):
     exchange = get_exchange()
     try:
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+        bars = exchange.fetch_ohlcv(symbol=symbol, timeframe=timeframe, limit=limit)
         df = pd.DataFrame(
-            ohlcv,
+            bars,
             columns=["timestamp", "open", "high", "low", "close", "volume"],
         )
         df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
         df.set_index("timestamp", inplace=True)
-        return df.sort_index()
+        df = df.sort_index()
+        return df
     except Exception as exc:
-        st.error(f"Error fetching {symbol} ({timeframe}): {exc}")
+        st.warning(f"Unable to fetch {symbol} on {timeframe}: {exc}")
         return pd.DataFrame()
 
 
@@ -52,24 +61,30 @@ def add_indicators(df):
     out["rsi"] = ta.rsi(out["close"], length=14)
     out["atr"] = ta.atr(out["high"], out["low"], out["close"], length=14)
     out["adx"] = ta.adx(out["high"], out["low"], out["close"], length=14)
+    out["volume_sma"] = out["volume"].rolling(window=20).mean()
 
     macd = ta.macd(out["close"], fast=12, slow=26, signal=9)
     if isinstance(macd, pd.DataFrame):
-        out = pd.concat([out, macd], axis=1)
+        for column in macd.columns:
+            out[column] = macd[column]
 
-    out["volume_sma"] = out["volume"].rolling(window=20).mean()
     return out
 
 
 def calculate_position_size(price, atr, account_size, risk_pct):
+    price = safe_number(price)
+    atr = safe_number(atr)
+    account_size = safe_number(account_size)
+    risk_pct = safe_number(risk_pct)
+
     if price <= 0 or atr <= 0 or account_size <= 0:
         return 0.0
+
     risk_amount = account_size * (risk_pct / 100)
     stop_distance = atr * 1.5
     if stop_distance <= 0:
         return 0.0
-    size = risk_amount / stop_distance
-    return round(float(size), 4)
+    return round(risk_amount / stop_distance, 4)
 
 
 def score_setup(df):
@@ -89,9 +104,10 @@ def score_setup(df):
     bearish_score = 0
     reasons = []
 
-    ema_9 = float(last.get("ema_9", 0) or 0)
-    ema_21 = float(last.get("ema_21", 0) or 0)
-    ema_50 = float(last.get("ema_50", 0) or 0)
+    ema_9 = safe_number(last.get("ema_9"))
+    ema_21 = safe_number(last.get("ema_21"))
+    ema_50 = safe_number(last.get("ema_50"))
+
     if ema_9 > ema_21 > ema_50:
         bullish_score += 25
         reasons.append("Bullish EMA stack")
@@ -99,57 +115,54 @@ def score_setup(df):
         bearish_score += 25
         reasons.append("Bearish EMA stack")
 
-    rsi = float(last.get("rsi", 0) or 0)
+    rsi = safe_number(last.get("rsi"), 50)
     if 55 <= rsi <= 70:
         bullish_score += 18
-        reasons.append("RSI in bullish zone")
+        reasons.append("RSI bullish")
     elif 30 <= rsi <= 45:
         bearish_score += 18
-        reasons.append("RSI in bearish zone")
+        reasons.append("RSI bearish")
     elif rsi > 70:
-        bullish_score += 8
-        reasons.append("Strong momentum")
+        bullish_score += 10
+        reasons.append("Momentum strong")
     elif rsi < 30:
-        bearish_score += 8
-        reasons.append("Oversold momentum")
+        bearish_score += 10
+        reasons.append("Momentum weak")
 
-    macd_col = "MACD_12_26_9" if "MACD_12_26_9" in df.columns else None
-    signal_col = "MACDs_12_26_9" if "MACDs_12_26_9" in df.columns else None
-    if macd_col and signal_col:
-        macd_val = float(last.get(macd_col, 0) or 0)
-        signal_val = float(last.get(signal_col, 0) or 0)
-        if macd_val > signal_val:
-            bullish_score += 15
-            reasons.append("MACD above signal")
-        elif macd_val < signal_val:
-            bearish_score += 15
-            reasons.append("MACD below signal")
+    macd_value = safe_number(last.get("MACD_12_26_9"))
+    signal_value = safe_number(last.get("MACDs_12_26_9"))
+    if macd_value > signal_value:
+        bullish_score += 12
+        reasons.append("MACD above signal")
+    elif macd_value < signal_value:
+        bearish_score += 12
+        reasons.append("MACD below signal")
 
-    adx = float(last.get("adx", 0) or 0)
+    adx = safe_number(last.get("adx"))
     if adx >= 25:
-        if last["close"] > ema_21:
+        if last.get("close", 0) > ema_21:
             bullish_score += 12
-            reasons.append("Trend is up")
+            reasons.append("Trend confirmed")
         else:
             bearish_score += 12
-            reasons.append("Trend is down")
+            reasons.append("Trend broken")
 
-    volume = float(last.get("volume", 0) or 0)
-    volume_sma = float(last.get("volume_sma", 0) or 0)
+    volume = safe_number(last.get("volume"))
+    volume_sma = safe_number(last.get("volume_sma"))
     if volume_sma > 0:
         if volume > volume_sma * 1.2:
             bullish_score += 10
-            reasons.append("Bullish volume expansion")
+            reasons.append("Volume expansion")
         elif volume < volume_sma * 0.8:
             bearish_score += 10
             reasons.append("Weak volume")
 
-    atr = float(last.get("atr", 0) or 0)
-    price = float(last.get("close", 0) or 0)
-    atr_pct = (atr / price) * 100 if price > 0 and atr > 0 else 0.0
+    price = safe_number(last.get("close"), 0)
+    atr = safe_number(last.get("atr"), 0)
+    atr_pct = ((atr / price) * 100) if price > 0 and atr > 0 else 0.0
 
     score = max(bullish_score, bearish_score) + abs(bullish_score - bearish_score) * 0.5
-    score = min(100.0, round(score, 1))
+    score = round(min(100.0, score), 1)
 
     if bullish_score > bearish_score and score >= 55:
         direction = "LONG"
@@ -171,14 +184,17 @@ def score_setup(df):
 
 @st.cache_data
 def scan_pairs():
-    results = []
-    timeframe_list = config.get("timeframes", ["15m"])
-    if isinstance(timeframe_list, str):
-        timeframe_list = [timeframe_list]
+    pairs = config.get("pairs", [])
+    if isinstance(pairs, dict):
+        pairs = list(pairs.keys())
 
-    pairs = config.get("pairs", {})
+    results = []
+    timeframes = config.get("timeframes", ["15m"])
+    if isinstance(timeframes, str):
+        timeframes = [timeframes]
+
     for symbol in pairs:
-        for timeframe in timeframe_list:
+        for timeframe in timeframes:
             df = fetch_ohlcv(symbol, timeframe=timeframe, limit=220)
             if df.empty:
                 continue
@@ -187,7 +203,7 @@ def scan_pairs():
             if setup["direction"] != "NEUTRAL" and setup["score"] >= 55:
                 results.append(
                     {
-                        "Symbol": symbol.replace(":USDT", ""),
+                        "Symbol": symbol.replace("/USDT", ""),
                         "Direction": setup["direction"],
                         "Score": setup["score"],
                         "Price": setup["price"],
@@ -197,28 +213,29 @@ def scan_pairs():
                         "Reasons": " • ".join(setup["reasons"]),
                     }
                 )
-    return sorted(results, key=lambda item: item["Score"], reverse=True)
+
+    return sorted(results, key=lambda row: row["Score"], reverse=True)
 
 
 st.title("📈 Bitfunded Signal Scanner")
-st.caption("Manual signals only • Designed for Bitfunded challenge risk management")
+st.caption("Manual trading signal dashboard for crypto pairs and Bitfunded challenge risk rules.")
 
-col1, col2, col3 = st.columns(3)
-with col1:
+with st.sidebar:
+    st.header("Controls")
     st.metric("Account Size", f"${config.get('account_size', 0):,}")
-with col2:
-    st.metric("Risk per Trade", f"{config.get('risk_per_trade_pct', 0)}%")
-with col3:
-    if st.button("🔄 Refresh", type="primary"):
+    st.metric("Risk / Trade", f"{config.get('risk_per_trade_pct', 0)}%")
+    st.metric("Max Open Positions", config.get("max_open_positions", 0))
+    st.metric("Min Hold", f"{config.get('min_hold_minutes', 12)} min")
+
+    if st.button("Refresh Signals", type="primary"):
         st.cache_data.clear()
         st.rerun()
 
-st.divider()
-
+st.subheader("Live opportunities")
 results = scan_pairs()
+
 if results:
     df_results = pd.DataFrame(results)
-    st.subheader("Ranked Opportunities")
     st.dataframe(
         df_results,
         use_container_width=True,
@@ -228,31 +245,51 @@ if results:
         },
     )
 
-    selected_symbol = st.selectbox("Choose a symbol to inspect", df_results["Symbol"].unique())
-    symbol = selected_symbol + "/USDT"
-    timeframe = st.selectbox("Timeframe", config.get("timeframes", ["15m"]))
-    chart_df = fetch_ohlcv(symbol, timeframe=timeframe, limit=220)
+    selected_symbol = st.selectbox("Inspect symbol", df_results["Symbol"].unique())
+    selected_tf = st.selectbox("Timeframe", config.get("timeframes", ["15m"]))
+
+    chart_df = fetch_ohlcv(f"{selected_symbol}/USDT", timeframe=selected_tf, limit=220)
     if not chart_df.empty:
         chart_df = add_indicators(chart_df)
         fig = go.Figure()
-        fig.add_trace(go.Candlestick(
-            x=chart_df.index,
-            open=chart_df["open"],
-            high=chart_df["high"],
-            low=chart_df["low"],
-            close=chart_df["close"],
-            name=symbol,
-        ))
+        fig.add_trace(
+            go.Candlestick(
+                x=chart_df.index,
+                open=chart_df["open"],
+                high=chart_df["high"],
+                low=chart_df["low"],
+                close=chart_df["close"],
+                name=f"{selected_symbol}/USDT",
+            )
+        )
         fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df["ema_9"], mode="lines", name="EMA 9"))
         fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df["ema_21"], mode="lines", name="EMA 21"))
         fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df["ema_50"], mode="lines", name="EMA 50"))
-        fig.update_layout(title=f"{symbol} {timeframe}", xaxis_rangeslider_visible=False)
+        fig.update_layout(title=f"{selected_symbol}/USDT {selected_tf}", xaxis_rangeslider_visible=False)
         st.plotly_chart(fig, use_container_width=True)
+
+    position_size = calculate_position_size(
+        price=chart_df["close"].iloc[-1],
+        atr=chart_df["atr"].iloc[-1],
+        account_size=config.get("account_size", 10000),
+        risk_pct=config.get("risk_per_trade_pct", 0.75),
+    )
+
+    st.info(
+        f"Suggested position size for {selected_symbol}/USDT: {position_size} contracts or units based on ATR and account risk."
+    )
 else:
-    st.warning("No high-quality setups found right now. Conditions are too weak or the market is quiet.")
+    st.warning("No high-quality setups are active right now. Conditions are weak or the market is quiet.")
 
 st.divider()
-st.info(
-    "Important: This tool is for manual trading signal review only. Always respect your daily loss limits, max loss caps, and minimum hold rules before executing any trade."
+st.subheader("Manual trade checklist")
+st.markdown(
+    """
+    - Confirm the market trend aligns with the signal
+    - Respect daily loss limit and max loss rule
+    - Check the minimum hold time before entry
+    - Only execute if the setup still makes sense after price action confirmation
+    - Keep a journal of entry, reason, exit, and outcome
+    """
 )
 

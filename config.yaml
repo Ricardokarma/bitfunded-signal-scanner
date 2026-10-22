@@ -1,21 +1,49 @@
-account_size: 10000
-daily_loss_limit_pct: 4.0
-max_loss_limit_pct: 6.0
-max_open_positions: 5
-risk_per_trade_pct: 0.75
-min_hold_minutes: 12
+# Bitfunded Signal Scanner
 
-pairs:
-  BTC/USDT: USDT
-  ETH/USDT: USDT
-  SOL/USDT: USDT
-  BNB/USDT: USDT
-  XRP/USDT: USDT
-  DOGE/USDT: USDT
-  ADA/USDT: USDT
-  AVAX/USDT: USDT
-  LINK/USDT: USDT
-  SUI/USDT: USDT
+A manual crypto signal dashboard for Bitfunded-style challenge trading.
 
-timeframes:
-  - 15m
+## What it does
+
+This app scans a curated list of major crypto pairs and uses a technical scoring model to flag high-probability opportunities for manual execution.
+
+Features:
+- Binance USD-M futures support via CCXT
+- EMA, RSI, MACD, ADX, ATR, and volume checks
+- Signal ranking with a score out of 100
+- Simple risk sizing based on account size and risk percentage
+- Manual trade checklist for Bitfunded discipline
+- Configurable pairs and timeframes in `config.yaml`
+
+## Run locally
+
+1. Create a virtual environment
+   ```bash
+   python -m venv .venv
+   source .venv/bin/activate
+   ```
+
+2. Install dependencies
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+3. Launch the app
+   ```bash
+   streamlit run app.py
+   ```
+
+4. Open the browser to the local Streamlit URL shown in the terminal.
+
+## Repository
+
+GitHub repository:
+https://github.com/Ricardokarma/bitfunded-signal-scanner
+
+## Download
+
+You can download the code as a ZIP from the repository page:
+https://github.com/Ricardokarma/bitfunded-signal-scanner/archive/refs/heads/main.zip
+
+## Notes
+
+This app is designed for manual execution only. It does not place trades automatically and should be used as a decision-support tool, not guaranteed profit automation.
