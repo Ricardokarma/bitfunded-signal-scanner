@@ -1,3 +1,4 @@
+import os
 import time
 from datetime import datetime
 
@@ -10,6 +11,9 @@ import streamlit as st
 import yaml
 
 st.set_page_config(page_title="Bitfunded Signal Scanner Pro", page_icon="📈", layout="wide")
+
+
+JOURNAL_PATH = "trades_journal.csv"
 
 
 @st.cache_data(ttl=30)
@@ -36,13 +40,14 @@ def safe_float(value, default=0.0):
         return float(default)
 
 
-@st.cache_data(ttl=30)
-def fetch_coingecko_btc_dominance():
+@st.cache_data(ttl=60)
+def fetch_btc_dominance():
     try:
         response = requests.get("https://api.coingecko.com/api/v3/global", timeout=10)
         response.raise_for_status()
         data = response.json()
-        return safe_float(data.get("data", {}).get("market_cap_percentage", {}).get("btc", 0.0), 0.0)
+        market_caps = data.get("data", {}).get("market_cap_percentage", {})
+        return safe_float(market_caps.get("btc", 0.0), 0.0)
     except Exception:
         return None
 
@@ -53,7 +58,7 @@ def fetch_ticker(symbol):
     try:
         ticker = exchange.fetch_ticker(symbol)
         return {
-            "last": safe_float(ticker.get("last")),
+            "last": safe_float(ticker.get("last"), 0.0),
             "change": safe_float(ticker.get("percentage"), 0.0),
             "baseVolume": safe_float(ticker.get("baseVolume"), 0.0),
             "quoteVolume": safe_float(ticker.get("quoteVolume"), 0.0),
@@ -61,14 +66,7 @@ def fetch_ticker(symbol):
             "ask": safe_float(ticker.get("ask"), 0.0),
         }
     except Exception:
-        return {
-            "last": 0.0,
-            "change": 0.0,
-            "baseVolume": 0.0,
-            "quoteVolume": 0.0,
-            "bid": 0.0,
-            "ask": 0.0,
-        }
+        return {"last": 0.0, "change": 0.0, "baseVolume": 0.0, "quoteVolume": 0.0, "bid": 0.0, "ask": 0.0}
 
 
 @st.cache_data(ttl=30)
@@ -102,7 +100,8 @@ def fetch_funding_and_oi(symbol):
 
     try:
         long_short = exchange.fetch_long_short_ratio(symbol=symbol)
-        result["longShortRatio"] = safe_float(long_short.get("ratio"), 0.0)
+        if isinstance(long_short, dict):
+            result["longShortRatio"] = safe_float(list(long_short.values())[0], 0.0)
     except Exception:
         pass
 
@@ -124,16 +123,37 @@ def add_indicators(df):
 
     macd = ta.macd(out["close"], fast=12, slow=26, signal=9)
     if isinstance(macd, pd.DataFrame):
-        for col in macd.columns:
-            out[col] = macd[col]
+        for column in macd.columns:
+            out[column] = macd[column]
 
     return out
 
 
-def estimate_win_rate(score, trend_strength, volatility_penalty):
-    base = 50 + (score - 50) * 0.6 + trend_strength
+def combine_signal_scores(score_15m, score_1h):
+    return round(min(100.0, (score_15m * 0.65) + (score_1h * 0.35)), 1)
+
+
+def estimate_win_rate(score, market_regime_strength, volatility_penalty):
+    base = 50 + (score - 50) * 0.6 + market_regime_strength
     estimate = max(35.0, min(78.0, base - volatility_penalty))
     return round(estimate, 1)
+
+
+def compute_regime(df):
+    if df.empty:
+        return "RANGE"
+
+    last = df.iloc[-1]
+    ema_9 = safe_float(last.get("ema_9"))
+    ema_21 = safe_float(last.get("ema_21"))
+    ema_50 = safe_float(last.get("ema_50"))
+    adx = safe_float(last.get("adx"), 0.0)
+
+    if ema_9 > ema_21 > ema_50 and adx > 25:
+        return "TRENDING_UP"
+    if ema_9 < ema_21 < ema_50 and adx > 25:
+        return "TRENDING_DOWN"
+    return "RANGE"
 
 
 def score_setup(df):
@@ -148,6 +168,7 @@ def score_setup(df):
             "atr": 0.0,
             "rsi": 0.0,
             "atr_pct": 0.0,
+            "regime": "RANGE",
             "trend_strength": 0.0,
             "volatility_penalty": 0.0,
         }
@@ -210,8 +231,8 @@ def score_setup(df):
             bearish_score += 10
             reasons.append("Weak volume")
 
-    price = safe_float(last.get("close"), 0)
-    atr = safe_float(last.get("atr"), 0)
+    price = safe_float(last.get("close"), 0.0)
+    atr = safe_float(last.get("atr"), 0.0)
     atr_pct = ((atr / price) * 100) if price > 0 and atr > 0 else 0.0
 
     trend_strength = abs(bullish_score - bearish_score) * 0.7
@@ -220,6 +241,8 @@ def score_setup(df):
     score = max(bullish_score, bearish_score) + abs(bullish_score - bearish_score) * 0.5
     score = round(min(100.0, score), 1)
 
+    regime = compute_regime(df)
+
     if bullish_score > bearish_score and score >= 55:
         direction = "LONG"
     elif bearish_score > bullish_score and score >= 55:
@@ -227,13 +250,7 @@ def score_setup(df):
     else:
         direction = "NEUTRAL"
 
-    if direction == "LONG":
-        confidence = min(99.0, 40 + score * 0.6)
-    elif direction == "SHORT":
-        confidence = min(99.0, 40 + score * 0.6)
-    else:
-        confidence = 0.0
-
+    confidence = min(99.0, 45 + score * 0.55) if direction in ["LONG", "SHORT"] else 0.0
     win_rate = estimate_win_rate(score, trend_strength, volatility_penalty)
 
     return {
@@ -246,6 +263,7 @@ def score_setup(df):
         "atr": atr,
         "rsi": rsi,
         "atr_pct": round(atr_pct, 2),
+        "regime": regime,
         "trend_strength": round(trend_strength, 2),
         "volatility_penalty": round(volatility_penalty, 2),
     }
@@ -267,93 +285,168 @@ def calculate_position_size(price, atr, account_size, risk_pct):
     return round(risk_amount / stop_distance, 4)
 
 
+def build_signal_for_symbol(symbol):
+    timeframes = config.get("timeframes", ["15m", "1h"])
+    viewed = []
+    for timeframe in timeframes:
+        df = fetch_ohlcv(symbol, timeframe=timeframe, limit=220)
+        if df.empty:
+            continue
+        df = add_indicators(df)
+        setup = score_setup(df)
+        setup["timeframe"] = timeframe
+        viewed.append(setup)
+
+    if not viewed:
+        return {"direction": "NEUTRAL", "score": 0.0, "confidence": 0.0, "win_rate": 0.0, "reasons": ["No data"], "timeframes": []}
+
+    score_15m = next((x["score"] for x in viewed if x["timeframe"] == "15m"), 0.0)
+    score_1h = next((x["score"] for x in viewed if x["timeframe"] == "1h"), 0.0)
+    combined = combine_signal_scores(score_15m, score_1h)
+
+    long_votes = sum(1 for x in viewed if x["direction"] == "LONG")
+    short_votes = sum(1 for x in viewed if x["direction"] == "SHORT")
+
+    if long_votes >= short_votes and combined >= 55:
+        direction = "LONG"
+    elif short_votes > long_votes and combined >= 55:
+        direction = "SHORT"
+    else:
+        direction = "NEUTRAL"
+
+    reasons = []
+    for item in viewed:
+        reasons.extend(item["reasons"])
+
+    final_confidence = min(99.0, (combined * 0.7) + (max(long_votes, short_votes) * 6)) if direction != "NEUTRAL" else 0.0
+    final_win_rate = min(78.0, max(35.0, combined * 0.7)) if direction != "NEUTRAL" else 0.0
+
+    return {
+        "direction": direction,
+        "score": round(combined, 1),
+        "confidence": round(final_confidence, 1),
+        "win_rate": round(final_win_rate, 1),
+        "reasons": reasons[:6],
+        "timeframes": [x["timeframe"] for x in viewed],
+    }
+
+
 @st.cache_data(ttl=30)
-def scan_pairs():
+def scan_market():
     pair_list = config.get("pairs", [])
     if isinstance(pair_list, dict):
         pair_list = list(pair_list.keys())
 
-    results = []
-    timeframes = config.get("timeframes", ["15m"])
-    if isinstance(timeframes, str):
-        timeframes = [timeframes]
-
+    rows = []
     for symbol in pair_list:
-        for timeframe in timeframes:
-            df = fetch_ohlcv(symbol, timeframe=timeframe, limit=220)
-            if df.empty:
-                continue
+        signal = build_signal_for_symbol(symbol)
+        if signal["direction"] == "NEUTRAL":
+            continue
+        if signal["score"] < 55:
+            continue
 
-            df = add_indicators(df)
-            setup = score_setup(df)
-            if setup["direction"] != "NEUTRAL" and setup["score"] >= 55:
-                ticker = fetch_ticker(symbol)
-                funding = fetch_funding_and_oi(symbol)
-                results.append(
-                    {
-                        "Symbol": symbol.replace("/USDT", ""),
-                        "Direction": setup["direction"],
-                        "Score": setup["score"],
-                        "Confidence": setup["confidence"],
-                        "Win Rate": setup["win_rate"],
-                        "Price": setup["price"],
-                        "RSI": round(setup["rsi"], 1),
-                        "ATR %": setup["atr_pct"],
-                        "Last Price": ticker.get("last", 0.0),
-                        "24h %": ticker.get("change", 0.0),
-                        "Volume": ticker.get("quoteVolume", 0.0),
-                        "Funding %": funding.get("fundingRate", 0.0),
-                        "OI": funding.get("openInterest", 0.0),
-                        "Timeframe": timeframe,
-                        "Reasons": " • ".join(setup["reasons"]),
-                    }
-                )
+        ticker = fetch_ticker(symbol)
+        funding = fetch_funding_and_oi(symbol)
+        rows.append(
+            {
+                "Symbol": symbol.replace("/USDT", ""),
+                "Direction": signal["direction"],
+                "Score": signal["score"],
+                "Confidence": signal["confidence"],
+                "Win Rate": signal["win_rate"],
+                "Price": ticker.get("last", 0.0),
+                "24h %": ticker.get("change", 0.0),
+                "Volume": ticker.get("quoteVolume", 0.0),
+                "Funding %": funding.get("fundingRate", 0.0),
+                "OI": funding.get("openInterest", 0.0),
+                "Reasons": " • ".join(signal["reasons"]),
+                "Timeframes": ", ".join(signal["timeframes"]),
+            }
+        )
 
-    return sorted(results, key=lambda row: row["Score"], reverse=True)
+    return sorted(rows, key=lambda item: item["Score"], reverse=True)
+
+
+def load_journal():
+    if not os.path.exists(JOURNAL_PATH):
+        return pd.DataFrame(columns=["timestamp", "symbol", "direction", "entry", "exit", "result", "notes"])
+    return pd.read_csv(JOURNAL_PATH)
+
+
+def save_trade_to_journal(symbol, direction, entry, exit_price, result, notes):
+    df = load_journal()
+    new_row = {
+        "timestamp": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+        "symbol": symbol,
+        "direction": direction,
+        "entry": entry,
+        "exit": exit_price,
+        "result": result,
+        "notes": notes,
+    }
+    df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+    df.to_csv(JOURNAL_PATH, index=False)
 
 
 st.title("📈 Bitfunded Signal Scanner Pro")
-st.caption("Real-time market scanner for scalps and 1–5 day crypto trades. Historical probability model only — not guaranteed income.")
+st.caption("Advanced market scanner built for manual execution, risk discipline, and Bitfunded challenge consistency.")
 
-btc_dom = fetch_coingecko_btc_dominance()
+btc_dom = fetch_btc_dominance()
 
 col1, col2, col3, col4 = st.columns(4)
 with col1:
-    st.metric("Account Size", f"${config.get('account_size', 0):,}")
+    st.metric("Account size", f"${config.get('account_size', 0):,}")
 with col2:
-    st.metric("Risk / Trade", f"{config.get('risk_per_trade_pct', 0)}%")
+    st.metric("Risk / trade", f"{config.get('risk_per_trade_pct', 0)}%")
 with col3:
-    st.metric("BTC Dominance", f"{btc_dom:.1f}%" if btc_dom is not None else "N/A")
+    st.metric("Daily loss cap", f"{config.get('daily_loss_limit_pct', 0)}%")
 with col4:
-    if st.button("Refresh market scan", type="primary"):
-        st.cache_data.clear()
-        st.rerun()
+    st.metric("BTC Dominance", f"{btc_dom:.1f}%" if btc_dom is not None else "N/A")
 
 st.divider()
 
-results = scan_pairs()
+with st.sidebar:
+    st.header("Challenge controls")
+    st.markdown(
+        f"""
+        - Max open positions: {config.get('max_open_positions', 0)}
+        - Min hold: {config.get('min_hold_minutes', 12)} min
+        - Daily loss cap: {config.get('daily_loss_limit_pct', 0)}%
+        - Hard max loss: {config.get('max_loss_limit_pct', 0)}%
+        """
+    )
+
+    if st.button("Refresh scan"):
+        st.cache_data.clear()
+        st.rerun()
+
+    st.divider()
+    st.subheader("Trade mode")
+    mode = st.radio("Select mode", ["Scalp", "Swing", "Challenge"], index=2)
+
+results = scan_market()
 
 if results:
-    df_results = pd.DataFrame(results)
-    st.subheader("Ranked opportunities")
+    df = pd.DataFrame(results)
+    st.subheader("Ranked market opportunities")
     st.dataframe(
-        df_results,
+        df,
         use_container_width=True,
         column_config={
             "Score": st.column_config.ProgressColumn("Score", min_value=0, max_value=100, format="%.1f"),
             "Confidence": st.column_config.ProgressColumn("Confidence", min_value=0, max_value=100, format="%.1f"),
             "Win Rate": st.column_config.ProgressColumn("Win Rate", min_value=0, max_value=100, format="%.1f"),
             "Price": st.column_config.NumberColumn(format="%.4f"),
-            "Last Price": st.column_config.NumberColumn(format="%.4f"),
             "24h %": st.column_config.NumberColumn(format="%.2f"),
             "Funding %": st.column_config.NumberColumn(format="%.4f"),
         },
     )
 
-    selected_symbol = st.selectbox("Inspect symbol", df_results["Symbol"].unique())
+    selected_symbol = st.selectbox("Inspect symbol", df["Symbol"].unique())
+    symbol = f"{selected_symbol}/USDT"
     selected_tf = st.selectbox("Timeframe", config.get("timeframes", ["15m"]))
-    chart_df = fetch_ohlcv(f"{selected_symbol}/USDT", timeframe=selected_tf, limit=220)
 
+    chart_df = fetch_ohlcv(symbol, timeframe=selected_tf, limit=220)
     if not chart_df.empty:
         chart_df = add_indicators(chart_df)
         fig = go.Figure()
@@ -364,68 +457,86 @@ if results:
                 high=chart_df["high"],
                 low=chart_df["low"],
                 close=chart_df["close"],
-                name=f"{selected_symbol}/USDT",
+                name=symbol,
             )
         )
         fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df["ema_9"], mode="lines", name="EMA 9"))
         fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df["ema_21"], mode="lines", name="EMA 21"))
         fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df["ema_50"], mode="lines", name="EMA 50"))
-        fig.update_layout(title=f"{selected_symbol}/USDT {selected_tf}", xaxis_rangeslider_visible=False)
+        fig.update_layout(title=f"{symbol} {selected_tf}", xaxis_rangeslider_visible=False)
         st.plotly_chart(fig, use_container_width=True)
 
-    summary_row = df_results[df_results["Symbol"] == selected_symbol].iloc[0]
-    price = safe_float(summary_row.get("Last Price")) or safe_float(summary_row.get("Price"))
-    atr_pct = safe_float(summary_row.get("ATR %"))
-    account_size = safe_float(config.get("account_size"), 10000)
-    risk_pct = safe_float(config.get("risk_per_trade_pct"), 0.75)
-    position_size = calculate_position_size(price, price * (atr_pct / 100), account_size, risk_pct)
-
+    market_row = df[df["Symbol"] == selected_symbol].iloc[0]
+    ticker = fetch_ticker(symbol)
+    price = safe_float(ticker.get("last"))
+    atr_pct = 0.6
+    size = calculate_position_size(price, price * (atr_pct / 100), config.get("account_size", 10000), config.get("risk_per_trade_pct", 0.75))
     st.info(
-        f"Model result: {summary_row['Direction']} | Score {summary_row['Score']} | Confidence {summary_row['Confidence']}% | Expected win rate {summary_row['Win Rate']}% | Suggested size {position_size} units"
+        f"Setup: {market_row['Direction']} | Score {market_row['Score']} | Confidence {market_row['Confidence']}% | Estimated win rate {market_row['Win Rate']}% | Suggested size ~ {size} units"
     )
 else:
-    st.warning("No strong trade candidates are active right now. Use a wider market filter or lower the score threshold.")
+    st.warning("No strong candidates found. The market is quiet or the setup quality is below the active threshold.")
 
 st.divider()
 
-st.subheader("Market structure overview")
-summary = {
-    "Long setups": int((df_results["Direction"] == "LONG").sum()) if "df_results" in locals() else 0,
-    "Short setups": int((df_results["Direction"] == "SHORT").sum()) if "df_results" in locals() else 0,
-    "Avg score": round(df_results["Score"].mean(), 1) if "df_results" in locals() and not df_results.empty else 0.0,
-    "Avg win rate": round(df_results["Win Rate"].mean(), 1) if "df_results" in locals() and not df_results.empty else 0.0,
-}
+st.subheader("Manual trade journal")
+with st.form("trade_journal_form"):
+    col_a, col_b, col_c = st.columns(3)
+    with col_a:
+        journal_symbol = st.text_input("Symbol", value="BTC/USDT")
+    with col_b:
+        journal_direction = st.selectbox("Direction", ["LONG", "SHORT"])
+    with col_c:
+        journal_entry = st.number_input("Entry", value=0.0, format="%.4f")
 
-col_a, col_b, col_c, col_d = st.columns(4)
-with col_a:
-    st.metric("Long setups", summary["Long setups"])
-with col_b:
-    st.metric("Short setups", summary["Short setups"])
-with col_c:
-    st.metric("Avg score", f"{summary['Avg score']:.1f}")
-with col_d:
-    st.metric("Avg win rate", f"{summary['Avg win rate']:.1f}%")
+    col_d, col_e, col_f = st.columns(3)
+    with col_d:
+        journal_exit = st.number_input("Exit", value=0.0, format="%.4f")
+    with col_e:
+        journal_result = st.number_input("Result %", value=0.0, format="%.2f")
+    with col_f:
+        journal_notes = st.text_input("Notes", value="")
+
+    submitted = st.form_submit_button("Save trade")
+    if submitted:
+        symbol_text = journal_symbol.strip()
+        if symbol_text:
+            save_trade_to_journal(
+                symbol=symbol_text,
+                direction=journal_direction,
+                entry=journal_entry,
+                exit_price=journal_exit,
+                result=journal_result,
+                notes=journal_notes,
+            )
+            st.success(f"Trade saved for {symbol_text}.")
+
+journal_df = load_journal()
+if not journal_df.empty:
+    st.dataframe(journal_df.tail(10), use_container_width=True)
+else:
+    st.caption("No journal entries yet.")
 
 st.divider()
+
+st.subheader("What makes this stronger")
 st.markdown(
     """
-    ### How to make this more reliable
-    - Use more than one timeframe: 15m, 1h, 4h, and daily
-    - Add liquidity + spread filters to avoid bad execution quality
-    - Add a market regime filter: trending vs ranging
-    - Add a sector/market-side filter: BTC dominance, funding, OI, liquidations
-    - Use a smaller set of high-quality pairs instead of every coin
-    - Track real trade outcomes and update the model with live performance data
-    - Do not overtrade when the market is weak or noisy
-    - Keep risk per trade small and consistent
+    - Multi-timeframe confirmation across higher-quality setups
+    - Strict risk limits by challenge rules
+    - Confidence and expected win-rate estimation
+    - Manual journal for actual outcome tracking
+    - Better filtering so the app prioritizes quality over quantity
+    - Trade modes: scalp, swing, challenge
     """
 )
 
-st.info("This app is a decision-support tool for manual execution. It does not guarantee successful trades or future profits. Use it to improve discipline, risk control, and market filtering.")
+st.info("This tool is designed to support manual execution, not to guarantee future profit. It helps you filter market conditions, manage risk, and improve decision quality over time.")
 
 
-# Optional: allows the app to stay responsive in a local dev environment
-# Keep a tiny delay only when a refresh is explicitly requested.
-if st.session_state.get("_manual_refresh"):
-    time.sleep(0.2)
-    st.session_state["_manual_refresh"] = False
+if mode == "Scalp":
+    st.caption("Scalp mode: focus on fast momentum, strong volume, clean trend, minimal noise, and small risk per trade.")
+elif mode == "Swing":
+    st.caption("Swing mode: focus on trend quality, multi-timeframe confirmation, and stronger trade persistence.")
+else:
+    st.caption("Challenge mode: prioritize risk discipline, max positions, daily loss limits, and only the highest-quality entries.")

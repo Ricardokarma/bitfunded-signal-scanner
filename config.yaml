@@ -1,27 +1,38 @@
 # Bitfunded Signal Scanner Pro
 
-A real-time crypto market scanner for Bitfunded-style challenge trading.
+A stronger, more disciplined crypto scanner for Bitfunded challenge trading.
 
 ## What it does
 
-This app scans a list of high-liquidity crypto pairs and ranks them using a model based on:
-- EMA alignment
-- RSI strength
-- MACD momentum
-- ADX trend confirmation
-- ATR-based volatility
+This app scans a watchlist of liquid crypto pairs and ranks them using a multi-factor trading model with:
+- EMA trend alignment
+- RSI momentum checks
+- MACD confirmation
+- ADX trend validation
+- ATR-based volatility control
 - volume confirmation
-- funding rate and open interest checks
-- BTC dominance snapshot from CoinGecko
+- funding-rate and open-interest checks
+- BTC dominance context
+- multi-timeframe scoring
 
-It produces:
-- Long / Short trade ideas
-- Signal score (0–100)
-- Confidence estimate
-- Expected win-rate estimate
-- Risk sizing estimate based on account size and risk percentage
+The dashboard gives:
+- Long / Short ideas
+- score out of 100
+- confidence estimate
+- expected win-rate estimate
+- risk sizing guidance
+- a manual trade journal for tracking real outcomes
 
-## Startup
+## Recommended use
+
+This is intended for:
+- scalps
+- short-to-medium swing trades
+- manual execution only
+
+It works best when used with a disciplined risk plan and challenge-specific limits.
+
+## Run locally
 
 1. Create a virtual environment
    ```bash
@@ -34,25 +45,31 @@ It produces:
    pip install -r requirements.txt
    ```
 
-3. Run the app
+3. Start the app
    ```bash
    streamlit run app.py
    ```
 
+4. Open the local URL shown in the terminal.
+
+## Files
+
+- `app.py` — market scanner and dashboard
+- `config.yaml` — trading settings and pair list
+- `requirements.txt` — Python dependencies
+- `trades_journal.csv` — locally saved manual trade log
+
+## Important note
+
+This app does not guarantee future profit and does not trade automatically.
+The win-rate estimate is a model-based estimate based on structure, indicators, and recent conditions, not a promise of future results.
+
+Use it to improve filtering, execution discipline, and challenge risk management.
+
 ## Repository
 
-GitHub repository:
 https://github.com/Ricardokarma/bitfunded-signal-scanner
 
 ## Download
 
-ZIP download:
 https://github.com/Ricardokarma/bitfunded-signal-scanner/archive/refs/heads/main.zip
-
-## Important warning
-
-This project is for education and manual trade support only.
-It does not guarantee profits, and it does not place trades automatically.
-The win-rate estimate is a model-based estimate, not a guaranteed future result.
-
-Use it to improve market scanning, execution discipline, and risk control.
