@@ -1,30 +1,51 @@
-account_size: 10000
-daily_loss_limit_pct: 4.0
-max_loss_limit_pct: 6.0
-max_open_positions: 5
-risk_per_trade_pct: 0.75
-min_hold_minutes: 12
+# Bitfunded Signal Scanner Pro
 
-pairs:
-  - BTC/USDT
-  - ETH/USDT
-  - SOL/USDT
-  - BNB/USDT
-  - XRP/USDT
-  - DOGE/USDT
-  - ADA/USDT
-  - AVAX/USDT
-  - LINK/USDT
-  - SUI/USDT
-  - NEAR/USDT
-  - LTC/USDT
-  - DOT/USDT
+A stronger, more disciplined crypto scanner for Bitfunded-style challenges.
 
-mode_defaults:
-  Scalp:
-    min_score: 58
-  Swing:
-    min_score: 62
-  Challenge:
-    min_score: 68
+## Overview
+
+This app scans active USDT futures markets, ranks the strongest Long and Short setups, and helps limit emotional overtrading. It is designed to support manual execution only.
+
+## Included features
+
+- automatic scan of active futures pairs
+- 15m + 1h multi-timeframe confirmation
+- EMA, RSI, MACD, ADX, ATR, and volume checks
+- directional signal scoring from 0 to 100
+- confidence and estimated win-rate output
+- BTC dominance context
+- funding and open-interest context
+- manual trade journal
+- auto-learning from journal results for better future suggestions
+- challenge risk controls and execution checklist
+
+## Local setup
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+streamlit run app.py
+```
+
+## How the learning works
+
+The app reads your saved trades from `trades_journal.csv` and analyzes:
+- average results by direction (LONG / SHORT)
+- average results by mode (Scalp / Swing / Challenge)
+- symbol-specific historical performance
+
+It then adjusts the scanner’s score and ranking to favor setups that historically perform better in your trading behavior.
+
+## Important note
+
+This app is for educational and decision-support purposes only. It does not guarantee profit and does not place trades automatically.
+
+## Repository
+
+https://github.com/Ricardokarma/bitfunded-signal-scanner
+
+## Direct ZIP download
+
+https://github.com/Ricardokarma/bitfunded-signal-scanner/archive/refs/heads/main.zip
 

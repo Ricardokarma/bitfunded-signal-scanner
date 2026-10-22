@@ -38,12 +38,17 @@ def safe_float(value, default=0.0):
         return float(default)
 
 
+def clamp(value, minimum, maximum):
+    return max(minimum, min(maximum, value))
+
+
 @st.cache_data(ttl=60)
 def fetch_btc_dominance():
     try:
         response = requests.get("https://api.coingecko.com/api/v3/global", timeout=10)
         response.raise_for_status()
-        market_caps = response.json().get("data", {}).get("market_cap_percentage", {})
+        data = response.json().get("data", {})
+        market_caps = data.get("market_cap_percentage", {})
         return safe_float(market_caps.get("btc", 0.0), 0.0)
     except Exception:
         return None
@@ -127,8 +132,7 @@ def get_active_pairs():
             continue
         valid.append(symbol)
 
-    unique = sorted(set(valid))
-    return unique
+    return sorted(set(valid))
 
 
 def add_indicators(df):
@@ -171,18 +175,7 @@ def compute_regime(df):
 
 def score_setup(df, mode):
     if df.empty:
-        return {
-            "direction": "NEUTRAL",
-            "score": 0.0,
-            "confidence": 0.0,
-            "win_rate": 0.0,
-            "reasons": ["No data"],
-            "price": 0.0,
-            "atr": 0.0,
-            "rsi": 0.0,
-            "atr_pct": 0.0,
-            "regime": "RANGE",
-        }
+        return {"direction": "NEUTRAL", "score": 0.0, "confidence": 0.0, "win_rate": 0.0, "reasons": ["No data"], "price": 0.0, "atr": 0.0, "rsi": 0.0, "atr_pct": 0.0, "regime": "RANGE"}
 
     mode_profile = {
         "Scalp": {"trend_weight": 1.2, "momentum_weight": 1.3, "volume_weight": 1.4, "min_score": 58},
@@ -192,8 +185,8 @@ def score_setup(df, mode):
     profile = mode_profile.get(mode, mode_profile["Challenge"])
 
     last = df.iloc[-1]
-    bullish_score = 0
-    bearish_score = 0
+    bullish_score = 0.0
+    bearish_score = 0.0
     reasons = []
 
     ema_9 = safe_float(last.get("ema_9"))
@@ -293,11 +286,7 @@ def build_signal(symbol, mode):
     if not setups:
         return {"direction": "NEUTRAL", "score": 0.0, "confidence": 0.0, "win_rate": 0.0, "reasons": ["No data"], "timeframes": []}
 
-    weighted = []
-    for item in setups:
-        weighted.append(item["score"])
-
-    overall_score = round(sum(weighted) / len(weighted), 1)
+    overall_score = round(sum(item["score"] for item in setups) / len(setups), 1)
     long_votes = sum(1 for item in setups if item["direction"] == "LONG")
     short_votes = sum(1 for item in setups if item["direction"] == "SHORT")
 
@@ -325,8 +314,113 @@ def build_signal(symbol, mode):
     }
 
 
+def build_learning_profile():
+    df = load_journal()
+    if df.empty:
+        return {
+            "direction_bias": {},
+            "mode_bias": {},
+            "symbol_bias": {},
+            "summary": "No journal data yet. The scanner is learning from future trades.",
+        }
+
+    df["direction"] = df["direction"].astype(str).str.upper().fillna("LONG")
+    df["mode"] = df["mode"].astype(str).str.title().fillna("Challenge")
+    df["result"] = pd.to_numeric(df["result"], errors="coerce").fillna(0.0)
+    df["symbol"] = df["symbol"].astype(str).str.upper().fillna("UNKNOWN")
+
+    direction_bias = {}
+    for direction in ["LONG", "SHORT"]:
+        subset = df[df["direction"] == direction]
+        if subset.empty:
+            direction_bias[direction] = {"avg_result": 0.0, "multiplier": 1.0, "count": 0}
+            continue
+        avg_result = float(subset["result"].mean())
+        direction_bias[direction] = {
+            "avg_result": round(avg_result, 2),
+            "multiplier": round(1 + (avg_result / 100.0), 3),
+            "count": int(len(subset)),
+        }
+
+    mode_bias = {}
+    for mode in sorted(df["mode"].unique()):
+        subset = df[df["mode"] == mode]
+        avg = float(subset["result"].mean())
+        mode_bias[mode] = {
+            "avg_result": round(avg, 2),
+            "multiplier": round(1 + (avg / 100.0), 3),
+            "count": int(len(subset)),
+        }
+
+    symbol_bias = {}
+    for symbol in sorted(df["symbol"].unique()):
+        subset = df[df["symbol"] == symbol]
+        avg = float(subset["result"].mean())
+        win_rate = float((subset["result"] > 0).mean()) * 100.0
+        symbol_bias[symbol] = {
+            "avg_result": round(avg, 2),
+            "win_rate": round(win_rate, 1),
+            "multiplier": round(1 + (avg / 100.0), 3),
+            "count": int(len(subset)),
+        }
+
+    summary = "Learning active: {} trade records analyzed across {} symbols.".format(len(df), len(symbol_bias))
+    return {"direction_bias": direction_bias, "mode_bias": mode_bias, "symbol_bias": symbol_bias, "summary": summary}
+
+
+def apply_learning_adjustment(signal, symbol, mode, direction, profile):
+    direction_data = profile["direction_bias"].get(direction, {"multiplier": 1.0})
+    mode_data = profile["mode_bias"].get(mode, {"multiplier": 1.0})
+    symbol_data = profile["symbol_bias"].get(symbol.upper(), {"multiplier": 1.0})
+
+    direction_multiplier = safe_float(direction_data.get("multiplier", 1.0), 1.0)
+    mode_multiplier = safe_float(mode_data.get("multiplier", 1.0), 1.0)
+    symbol_multiplier = safe_float(symbol_data.get("multiplier", 1.0), 1.0)
+
+    adjusted = signal["score"] * direction_multiplier * mode_multiplier * symbol_multiplier
+    adjusted = clamp(round(adjusted, 1), 0.0, 100.0)
+
+    note = "Learned adjustments: {} × {} × {} = {:.1f}".format(
+        round(direction_multiplier, 3),
+        round(mode_multiplier, 3),
+        round(symbol_multiplier, 3),
+        adjusted,
+    )
+    return adjusted, note
+
+
+def load_journal():
+    if not os.path.exists(JOURNAL_PATH):
+        return pd.DataFrame(columns=["timestamp", "symbol", "direction", "entry", "exit", "result", "notes", "mode"])
+
+    df = pd.read_csv(JOURNAL_PATH)
+    for column in ["timestamp", "symbol", "direction", "entry", "exit", "result", "notes", "mode"]:
+        if column not in df.columns:
+            df[column] = ""
+    df["result"] = pd.to_numeric(df["result"], errors="coerce").fillna(0.0)
+    df["mode"] = df["mode"].fillna("Challenge")
+    return df
+
+
+def save_trade_to_journal(symbol, direction, entry, exit_price, result, notes, mode):
+    df = load_journal()
+    new_row = {
+        "timestamp": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+        "symbol": symbol,
+        "direction": direction,
+        "entry": entry,
+        "exit": exit_price,
+        "result": result,
+        "notes": notes,
+        "mode": mode,
+    }
+    df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+    df.to_csv(JOURNAL_PATH, index=False)
+
+
 @st.cache_data(ttl=30)
 def scan_market(mode):
+    learning_profile = build_learning_profile()
     pair_list = config.get("pairs") or []
     if not pair_list:
         pair_list = get_active_pairs()
@@ -338,6 +432,12 @@ def scan_market(mode):
         signal = build_signal(symbol, mode)
         if signal["direction"] == "NEUTRAL":
             continue
+
+        adjusted_score, learning_note = apply_learning_adjustment(signal, symbol, mode, signal["direction"], learning_profile)
+        signal["score"] = adjusted_score
+        signal["confidence"] = clamp(round(signal["confidence"] * 0.9, 1), 0.0, 99.0)
+        signal["win_rate"] = clamp(round(signal["win_rate"] * 0.9, 1), 0.0, 78.0)
+
         if signal["score"] < 58:
             continue
 
@@ -357,35 +457,15 @@ def scan_market(mode):
                 "OI": funding.get("openInterest", 0.0),
                 "Reasons": " • ".join(signal["reasons"]),
                 "Timeframes": ", ".join(signal["timeframes"]),
+                "Learning": learning_note,
             }
         )
 
     return sorted(rows, key=lambda item: item["Score"], reverse=True)
 
 
-def load_journal():
-    if not os.path.exists(JOURNAL_PATH):
-        return pd.DataFrame(columns=["timestamp", "symbol", "direction", "entry", "exit", "result", "notes"])
-    return pd.read_csv(JOURNAL_PATH)
-
-
-def save_trade_to_journal(symbol, direction, entry, exit_price, result, notes):
-    df = load_journal()
-    new_row = {
-        "timestamp": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
-        "symbol": symbol,
-        "direction": direction,
-        "entry": entry,
-        "exit": exit_price,
-        "result": result,
-        "notes": notes,
-    }
-    df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-    df.to_csv(JOURNAL_PATH, index=False)
-
-
 st.title("📈 Bitfunded Signal Scanner Pro")
-st.caption("Risk-aware market scanner built for manual execution, multi-timeframe confirmation, and challenge discipline.")
+st.caption("Self-learning market scanner using journal feedback to improve future trade suggestions.")
 
 btc_dom = fetch_btc_dominance()
 
@@ -403,8 +483,13 @@ st.divider()
 
 with st.sidebar:
     st.header("Controls")
-    mode = st.radio("Trade mode", options=["Scalp", "Swing", "Challenge"], index=2)
-    min_score = st.slider("Minimum score", min_value=50, max_value=85, value=58)
+    mode = st.radio("Trade mode", ["Scalp", "Swing", "Challenge"], index=2)
+    min_score = st.slider("Minimum score", 50, 85, 58)
+
+    learning_profile = build_learning_profile()
+    st.subheader("Auto-learning")
+    st.write(learning_profile["summary"])
+
     if st.button("Refresh scan"):
         st.cache_data.clear()
         st.rerun()
@@ -461,12 +546,17 @@ if results:
     row = df[df["Symbol"] == selected_symbol].iloc[0]
     price = safe_float(row.get("Price"))
     atr_estimate = max(price * 0.003, 0.01)
-    pos_size = round((safe_float(config.get("account_size")) * (safe_float(config.get("risk_per_trade_pct")) / 100)) / (atr_estimate * 1.5), 4)
-    st.info(
-        f"{row['Direction']} setup on {selected_symbol}/USDT | Score {row['Score']} | Confidence {row['Confidence']}% | Estimated win rate {row['Win Rate']}% | Suggested size {pos_size} units"
+    position_size = round(
+        (safe_float(config.get("account_size")) * (safe_float(config.get("risk_per_trade_pct")) / 100)) / (atr_estimate * 1.5),
+        4,
     )
+    st.info(
+        f"{row['Direction']} setup on {selected_symbol}/USDT | Score {row['Score']} | Confidence {row['Confidence']}% | Estimated win rate {row['Win Rate']}% | Suggested size {position_size} units"
+    )
+    if "Learning" in row:
+        st.caption(row["Learning"])
 else:
-    st.warning("No quality setups meet this mode’s filter. Try lowering the minimum score or wait for a stronger trend setup.")
+    st.warning("No quality setups meet this mode’s filter. Lower the minimum score or wait for stronger trend conditions.")
 
 st.divider()
 
@@ -486,14 +576,16 @@ with st.form("journal_form"):
     with c5:
         journal_result = st.number_input("Result %", value=0.0, format="%.2f")
     with c6:
-        journal_notes = st.text_input("Notes", value="")
+        journal_mode = st.selectbox("Mode", ["Scalp", "Swing", "Challenge"], index=2)
 
+    journal_notes = st.text_input("Notes", value="")
     submitted = st.form_submit_button("Save trade")
     if submitted:
         symbol_text = journal_symbol.strip()
         if symbol_text:
-            save_trade_to_journal(symbol_text, journal_direction, journal_entry, journal_exit, journal_result, journal_notes)
+            save_trade_to_journal(symbol_text, journal_direction, journal_entry, journal_exit, journal_result, journal_notes, journal_mode)
             st.success(f"Trade saved for {symbol_text}.")
+            st.cache_data.clear()
 
 journal_df = load_journal()
 if not journal_df.empty:
@@ -503,17 +595,15 @@ else:
 
 st.divider()
 
-st.subheader("Execution checklist")
-st.markdown(
-    """
-    - Confirm the market regime supports the signal
-    - Check that the token remains liquid and not manipulated
-    - Respect challenge risk rules and max exposure
-    - Validate the signal on both 15m and 1h context
-    - Only execute after the setup still makes sense on live price action
-    - Record each trade result to improve future filtering
-    """
-)
+st.subheader("Learning insights")
+profile = build_learning_profile()
+if profile["direction_bias"]:
+    direction_df = pd.DataFrame.from_dict(profile["direction_bias"], orient="index").reset_index().rename(columns={"index": "Direction"})
+    st.dataframe(direction_df, use_container_width=True)
 
-st.info("This tool is designed for manual execution support only. It does not guarantee future profit or success, and the confidence / projected win-rate values are model-based estimates, not certainties.")
+    symbol_df = pd.DataFrame.from_dict(profile["symbol_bias"], orient="index").reset_index().rename(columns={"index": "Symbol"})
+    top_symbols = symbol_df.sort_values("avg_result", ascending=False).head(10)
+    st.dataframe(top_symbols, use_container_width=True)
+
+st.info("The scanner learns from your recorded results. Over time it adjusts its suggestions based on trade quality by direction, mode, and symbol performance.")
 
