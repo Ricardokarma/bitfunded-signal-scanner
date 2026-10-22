@@ -2,8 +2,6 @@ import os
 from datetime import datetime
 
 import ccxt
-import pandas as pd
-import pandas_ta as ta
 import plotly.graph_objects as go
 import requests
 import streamlit as st
