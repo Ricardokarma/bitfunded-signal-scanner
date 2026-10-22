@@ -1,36 +1,35 @@
 # Bitfunded Signal Scanner Pro
 
-A stronger, more disciplined crypto scanner for Bitfunded challenge trading.
+A stronger, more disciplined crypto scanner for Bitfunded-style challenge trading.
 
 ## What it does
 
-This app scans a watchlist of liquid crypto pairs and ranks them using a multi-factor trading model with:
-- EMA trend alignment
+This app scans active USDT futures markets dynamically, filters them by quality, and ranks the best Long and Short setups using:
+- EMA alignment
 - RSI momentum checks
 - MACD confirmation
 - ADX trend validation
 - ATR-based volatility control
-- volume confirmation
+- trend and volume filtering
 - funding-rate and open-interest checks
 - BTC dominance context
 - multi-timeframe scoring
 
-The dashboard gives:
-- Long / Short ideas
-- score out of 100
-- confidence estimate
+It also includes:
+- dynamic full-market scan instead of a fixed watchlist
+- score and confidence ranking
 - expected win-rate estimate
-- risk sizing guidance
-- a manual trade journal for tracking real outcomes
+- challenge-specific risk controls
+- manual trade journal for real-world feedback
 
 ## Recommended use
 
-This is intended for:
-- scalps
-- short-to-medium swing trades
+This is designed for:
+- scalp trades
+- short-to-medium-term swing trades
 - manual execution only
 
-It works best when used with a disciplined risk plan and challenge-specific limits.
+Use it as a decision-support tool and keep risk disciplined.
 
 ## Run locally
 
@@ -54,22 +53,21 @@ It works best when used with a disciplined risk plan and challenge-specific limi
 
 ## Files
 
-- `app.py` — market scanner and dashboard
-- `config.yaml` — trading settings and pair list
+- `app.py` — dynamic market scanner and dashboard
+- `config.yaml` — challenge settings and scan configuration
 - `requirements.txt` — Python dependencies
-- `trades_journal.csv` — locally saved manual trade log
+- `trades_journal.csv` — optional manual trade log
 
 ## Important note
 
-This app does not guarantee future profit and does not trade automatically.
-The win-rate estimate is a model-based estimate based on structure, indicators, and recent conditions, not a promise of future results.
-
-Use it to improve filtering, execution discipline, and challenge risk management.
+This project is for education and manual trading support only.
+It does not guarantee profits and does not place trades automatically.
+The confidence and win-rate numbers are model-based estimates, not guaranteed outcomes.
 
 ## Repository
 
 https://github.com/Ricardokarma/bitfunded-signal-scanner
 
-## Download
+## ZIP download
 
 https://github.com/Ricardokarma/bitfunded-signal-scanner/archive/refs/heads/main.zip

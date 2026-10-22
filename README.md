@@ -32,7 +32,7 @@ def get_exchange():
     })
 
 
-@st.cache_data(ttl=120)
+@st.cache_data(ttl=180)
 def get_all_active_usdt_pairs():
     exchange = get_exchange()
     try:
@@ -44,25 +44,27 @@ def get_all_active_usdt_pairs():
     for symbol, market in markets.items():
         if not market.get("active", False):
             continue
-        if market.get("settle") != "USDT":
-            continue
         if market.get("quote") != "USDT":
             continue
-        if market.get("type") != "future":
+        if market.get("type") not in ("future", "swap"): 
             continue
-        if symbol.endswith(("/USDT", "USDT")):
-            pass
-        if "/USDT" in symbol and not symbol.startswith(("BTC/USDT", "ETH/USDT")):
-            valid.append(symbol)
-        if symbol in ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT", "DOGE/USDT", "ADA/USDT", "AVAX/USDT", "LINK/USDT", "SUI/USDT"]:
-            valid.append(symbol)
+        if "/USDT" not in symbol:
+            continue
+
+        base = symbol.split("/")[0]
+        if base in {"BUSD", "USDC", "TUSD", "DAI", "FDUSD", "EUR", "GBP"}:
+            continue
+
+        valid.append(symbol)
 
     seen = set()
     cleaned = []
-    for s in valid:
-        if s not in seen:
-            seen.add(s)
-            cleaned.append(s)
+    for symbol in valid:
+        if symbol in seen:
+            continue
+        seen.add(symbol)
+        cleaned.append(symbol)
+
     cleaned.sort()
     return cleaned
 
@@ -77,11 +79,10 @@ def safe_float(value, default=0.0):
 @st.cache_data(ttl=60)
 def fetch_btc_dominance():
     try:
-        response = requests.get("https://api.coingecko.com/api/v3/global", timeout=10)
-        response.raise_for_status()
-        data = response.json()
-        market_caps = data.get("data", {}).get("market_cap_percentage", {})
-        return safe_float(market_caps.get("btc", 0.0), 0.0)
+        r = requests.get("https://api.coingecko.com/api/v3/global", timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        return safe_float(data.get("data", {}).get("market_cap_percentage", {}).get("btc", 0.0), 0.0)
     except Exception:
         return None
 
@@ -158,8 +159,8 @@ def add_indicators(df):
 
     macd = ta.macd(out["close"], fast=12, slow=26, signal=9)
     if isinstance(macd, pd.DataFrame):
-        for column in macd.columns:
-            out[column] = macd[column]
+        for c in macd.columns:
+            out[c] = macd[c]
 
     return out
 
@@ -168,8 +169,8 @@ def combine_signal_scores(score_15m, score_1h):
     return round(min(100.0, (score_15m * 0.65) + (score_1h * 0.35)), 1)
 
 
-def estimate_win_rate(score, market_regime_strength, volatility_penalty):
-    base = 50 + (score - 50) * 0.6 + market_regime_strength
+def estimate_win_rate(score, regime_strength, volatility_penalty):
+    base = 50 + (score - 50) * 0.6 + regime_strength
     estimate = max(35.0, min(78.0, base - volatility_penalty))
     return round(estimate, 1)
 
@@ -425,7 +426,7 @@ def save_trade_to_journal(symbol, direction, entry, exit_price, result, notes):
 
 
 st.title("📈 Bitfunded Signal Scanner Pro")
-st.caption("Dynamic futures scanner with market-wide filtering, confidence scoring, and trade journaling.")
+st.caption("Dynamic futures scanner built for scalp, swing, and challenge-style market selection.")
 
 btc_dom = fetch_btc_dominance()
 
@@ -556,21 +557,21 @@ st.divider()
 
 st.markdown(
     """
-    ### Better reliability recommendations
-    - Keep the market scan wide, but only trade the strongest-ranked setups
-    - Use multi-timeframe confirmation before executing
-    - Respect challenge risk limits strictly
-    - Track actual outcomes to improve the model over time
-    - Reduce exposure when BTC dominance or funding conditions are hostile
-    - Separate scalp, swing, and challenge execution
+    ### Why this is stronger
+    - Automatic full-market scan of active USDT futures pairs
+    - Multi-timeframe confirmation
+    - Confidence and expected win-rate estimates
+    - Risk controls designed for Bitfunded challenge rules
+    - Trade journal to improve the model from real outcomes
+    - Better filtering so the app favors quality over quantity
     """
 )
 
-st.info("This app helps you scan the full active futures market, rank only the strongest setups, and manage risk with manual execution discipline. It does not guarantee profit or future outcomes.")
+st.info("This app helps you scan the broader market, rank only the strongest setups, and keep execution disciplined. It does not guarantee future profit or outcomes.")
 
 if mode == "Scalp":
-    st.caption("Scalp mode: prioritize fast momentum, clean trend, volume confirmation, and small risk per trade.")
+    st.caption("Scalp mode: favor quick momentum, clean trend, strong volume, and minimal risk on fast entries.")
 elif mode == "Swing":
-    st.caption("Swing mode: favor stronger trend behavior, multi-timeframe confirmation, and better persistence.")
+    st.caption("Swing mode: favor stronger trend behavior and multi-timeframe confirmation for higher-quality persistence.")
 else:
-    st.caption("Challenge mode: prioritize risk discipline, low exposure, and only the best-quality setups.")
+    st.caption("Challenge mode: prioritize risk discipline, controlled exposure, and only the strongest setups.")

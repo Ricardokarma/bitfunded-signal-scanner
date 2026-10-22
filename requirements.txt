@@ -23,3 +23,5 @@ pairs:
 timeframes:
   - 15m
   - 1h
+
+scan_mode: auto
