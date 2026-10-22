@@ -1,20 +1,27 @@
-# Bitfunded Signal Scanner
+# Bitfunded Signal Scanner Pro
 
-A manual crypto signal dashboard for Bitfunded-style challenge trading.
+A real-time crypto market scanner for Bitfunded-style challenge trading.
 
 ## What it does
 
-This app scans a curated list of major crypto pairs and uses a technical scoring model to flag high-probability opportunities for manual execution.
+This app scans a list of high-liquidity crypto pairs and ranks them using a model based on:
+- EMA alignment
+- RSI strength
+- MACD momentum
+- ADX trend confirmation
+- ATR-based volatility
+- volume confirmation
+- funding rate and open interest checks
+- BTC dominance snapshot from CoinGecko
 
-Features:
-- Binance USD-M futures support via CCXT
-- EMA, RSI, MACD, ADX, ATR, and volume checks
-- Signal ranking with a score out of 100
-- Simple risk sizing based on account size and risk percentage
-- Manual trade checklist for Bitfunded discipline
-- Configurable pairs and timeframes in `config.yaml`
+It produces:
+- Long / Short trade ideas
+- Signal score (0–100)
+- Confidence estimate
+- Expected win-rate estimate
+- Risk sizing estimate based on account size and risk percentage
 
-## Run locally
+## Startup
 
 1. Create a virtual environment
    ```bash
@@ -27,12 +34,10 @@ Features:
    pip install -r requirements.txt
    ```
 
-3. Launch the app
+3. Run the app
    ```bash
    streamlit run app.py
    ```
-
-4. Open the browser to the local Streamlit URL shown in the terminal.
 
 ## Repository
 
@@ -41,9 +46,13 @@ https://github.com/Ricardokarma/bitfunded-signal-scanner
 
 ## Download
 
-You can download the code as a ZIP from the repository page:
+ZIP download:
 https://github.com/Ricardokarma/bitfunded-signal-scanner/archive/refs/heads/main.zip
 
-## Notes
+## Important warning
 
-This app is designed for manual execution only. It does not place trades automatically and should be used as a decision-support tool, not guaranteed profit automation.
+This project is for education and manual trade support only.
+It does not guarantee profits, and it does not place trades automatically.
+The win-rate estimate is a model-based estimate, not a guaranteed future result.
+
+Use it to improve market scanning, execution discipline, and risk control.

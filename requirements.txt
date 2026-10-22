@@ -16,6 +16,10 @@ pairs:
   - AVAX/USDT
   - LINK/USDT
   - SUI/USDT
+  - NEAR/USDT
+  - LTC/USDT
+  - DOT/USDT
 
 timeframes:
   - 15m
+  - 1h
