@@ -1,3 +1,7 @@
+import os
+from pathlib import Path
+from datetime import datetime, timezone
+
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -5,7 +9,7 @@ import requests
 import streamlit as st
 import yaml
 
-st.set_page_config(page_title="Bitfunded Scanner", page_icon="ðŸŽ¯", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="Bitfunded Scanner", page_icon="🎯", layout="wide", initial_sidebar_state="collapsed")
 
 JOURNAL_PATH = "trades_journal.csv"
 OKX = "https://www.okx.com"
@@ -331,7 +335,7 @@ def institutional_size(price, sl, account, risk_pct, inst_meta):
     lot = safe_float(inst_meta.get("lotSz"), 0.01)
     min_sz = safe_float(inst_meta.get("minSz"), lot)
 
-    # USDT loss per 1 contract â‰ˆ ctVal * ctMult * stop_distance
+    # USDT loss per 1 contract ≈ ctVal * ctMult * stop_distance
     loss_per_contract = ct_val * ct_mult * stop
     if loss_per_contract <= 0:
         return {"contracts": 0.0, "notional": 0.0, "risk_usd": risk_usd, "ok": False, "msg": "bad ctVal"}
@@ -419,12 +423,15 @@ def build_signal(inst_id, mode, macro):
 
 
 def load_journal():
-    if not os.path.exists(JOURNAL_PATH):
-        return pd.DataFrame()
+    """Always safe — never breaks the UI."""
     try:
-        return pd.read_csv(JOURNAL_PATH)
+        from pathlib import Path as _P
+        path = _P("trades_journal.csv")
+        if path.is_file():
+            return pd.read_csv(path)
     except Exception:
-        return pd.DataFrame()
+        pass
+    return pd.DataFrame()
 
 
 def learning_line(df):
@@ -522,7 +529,7 @@ with tab_risk:
     dstop = st.session_state.account_size * st.session_state.daily_loss / 100
     mdd = st.session_state.account_size * st.session_state.max_dd / 100
     st.success(f"Target ${tgt:,.0f} | Daily stop ${dstop:,.0f} | Max DD ${mdd:,.0f} | Max positions {st.session_state.max_positions}")
-    st.caption("Nunca arrisques mais do que o daily loss permite somando trades abertos.")
+    st.caption("Never risk more than the daily loss limit across open trades.")
 
 with tab_scan:
     st.session_state.favorites = st.multiselect(
@@ -560,7 +567,7 @@ with tab_scan:
     if btc.get("last"):
         dom = f"{glob['btc_dom']:.1f}%" if glob.get("btc_dom") else "-"
         st.success(f"OKX online | BTC {btc['change']:+.2f}% | Dom {dom}")
-    st.caption(learning_line(load_journal()))
+    st.caption("Learning: optional (see Advanced)")
 
     with st.spinner(f"Scanning {len(scan_list)} pairs..."):
         results = scan_symbols(st.session_state.mode, "|".join(scan_list), fng.get("value"), btc.get("change"))
@@ -575,7 +582,7 @@ with tab_scan:
         sizing = institutional_size(r["Entry"], r["SL"], st.session_state.account_size, st.session_state.risk_pct, meta)
         contracts = sizing["contracts"] if sizing["ok"] else 0
         st.markdown(
-            f"**{r['Symbol']} ({r['Conf']:.0f}%) Â· {r['Direction']}**  \n"
+            f"**{r['Symbol']} ({r['Conf']:.0f}%) · {r['Direction']}**  \n"
             f"Entry: `{fmt_px(r['Entry'])}` | SL: `{fmt_px(r['SL'])}` | TP1: `{fmt_px(r['TP1'])}` | TP2: `{fmt_px(r['TP2'])}`  \n"
             f"Score {r['Score']:.0f} | 24h {r['Change']:+.1f}% | "
             f"contracts **{contracts}** | notional ${sizing.get('notional', 0):,.0f} | "
@@ -584,21 +591,21 @@ with tab_scan:
         )
         st.divider()
 
-    st.markdown(f"### Top Longs ({len(longs)}) Â· min score {min_s}")
+    st.markdown(f"### Top Longs ({len(longs)}) | min score {min_s}")
     if longs:
         for r in longs:
             render_card(r)
     else:
-        st.caption("Sem LONG. Em queda usa Scalp ou espera RSI oversold / REVERSAL.")
+        st.caption("No strong LONGs. In a dump use Scalp or wait for RSI oversold / REVERSAL.")
 
-    st.markdown(f"### Top Shorts ({len(shorts)}) Â· min score {min_s}")
+    st.markdown(f"### Top Shorts ({len(shorts)}) | min score {min_s}")
     if shorts:
         for r in shorts:
             render_card(r)
     else:
-        st.caption("Sem SHORT neste filtro.")
+        st.caption("No STRONGs matching this filter.")
 
-    st.info(f"Max positions challenge: **{st.session_state.max_positions}**. Nao abras mais do que isso ao mesmo tempo.")
+    st.info(f"Challenge max open positions: **{st.session_state.max_positions}**. Do not open more than this at once.")
 
     pool = longs + shorts
     if pool:
@@ -633,7 +640,7 @@ with tab_scan:
                 st.plotly_chart(fig2, use_container_width=True)
 
 with tab_sniper:
-    st.subheader("Institutional setup Â· 1 token")
+    st.subheader("Institutional setup | 1 token")
     tok = st.selectbox("SELECT TOKEN", options=all_symbols, index=all_symbols.index("BTC") if "BTC" in all_symbols else 0)
     direction = st.radio("DIRECTION", ["LONG", "SHORT"], horizontal=True)
     inst = to_inst(tok)
@@ -668,7 +675,7 @@ with tab_sniper:
             if not sizing.get("ok"):
                 st.warning(f"Size note: {sizing.get('msg')}")
 
-with st.expander("Advanced | log manual (learning)", expanded=False):
+with st.expander("Advanced | manual trade log (learning)", expanded=False):
     with st.form("log"):
         a, b, c = st.columns(3)
         js = a.text_input("Symbol", "BTC")
@@ -678,7 +685,7 @@ with st.expander("Advanced | log manual (learning)", expanded=False):
             df = load_journal()
             row = {"timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"), "symbol": js, "direction": jd, "result": jr, "mode": st.session_state.mode}
             df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
-            df.to_csv(JOURNAL_PATH, index=False)
+            df.to_csv(Path(JOURNAL_PATH), index=False)
             st.success("Saved")
             st.rerun()
 
