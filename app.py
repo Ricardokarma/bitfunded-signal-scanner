@@ -1,7 +1,6 @@
 import os
 from datetime import datetime, timezone
 
-import ccxt
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -17,21 +16,21 @@ st.set_page_config(
 )
 
 JOURNAL_PATH = "trades_journal.csv"
+OKX = "https://www.okx.com"
 
+# OKX SWAP instIds (USDT perpetual)
 DEFAULT_PAIRS = [
-    "BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT",
-    "DOGE/USDT", "ADA/USDT", "AVAX/USDT", "LINK/USDT", "DOT/USDT",
-    "NEAR/USDT", "APT/USDT", "ARB/USDT", "OP/USDT", "SUI/USDT",
-    "PEPE/USDT", "WIF/USDT", "AAVE/USDT", "UNI/USDT", "LTC/USDT",
-    "BCH/USDT", "ATOM/USDT", "FIL/USDT", "INJ/USDT", "TIA/USDT",
-    "SEI/USDT", "RENDER/USDT", "FET/USDT", "IMX/USDT", "ORDI/USDT",
+    "BTC-USDT-SWAP", "ETH-USDT-SWAP", "SOL-USDT-SWAP", "BNB-USDT-SWAP", "XRP-USDT-SWAP",
+    "DOGE-USDT-SWAP", "ADA-USDT-SWAP", "AVAX-USDT-SWAP", "LINK-USDT-SWAP", "DOT-USDT-SWAP",
+    "NEAR-USDT-SWAP", "APT-USDT-SWAP", "ARB-USDT-SWAP", "OP-USDT-SWAP", "SUI-USDT-SWAP",
+    "PEPE-USDT-SWAP", "WIF-USDT-SWAP", "AAVE-USDT-SWAP", "UNI-USDT-SWAP", "LTC-USDT-SWAP",
+    "BCH-USDT-SWAP", "ATOM-USDT-SWAP", "FIL-USDT-SWAP", "INJ-USDT-SWAP", "TIA-USDT-SWAP",
+    "SEI-USDT-SWAP", "RENDER-USDT-SWAP", "FET-USDT-SWAP", "IMX-USDT-SWAP", "ORDI-USDT-SWAP",
 ]
 
-MODE_THRESHOLDS = {
-    "Scalp": 52,
-    "Swing": 58,
-    "Challenge": 65,
-}
+MODE_THRESHOLDS = {"Scalp": 48, "Swing": 55, "Challenge": 62}
+
+TF_MAP = {"15m": "15m", "1h": "1H", "5m": "5m", "1H": "1H"}
 
 
 def safe_float(value, default=0.0):
@@ -43,6 +42,10 @@ def safe_float(value, default=0.0):
 
 def clamp(value, minimum, maximum):
     return max(minimum, min(maximum, value))
+
+
+def display_symbol(inst_id):
+    return inst_id.replace("-USDT-SWAP", "").replace("-SWAP", "")
 
 
 @st.cache_data(ttl=120)
@@ -57,15 +60,17 @@ def load_config():
 config = load_config()
 
 
-@st.cache_resource
-def get_exchange():
-    return ccxt.binanceusdm(
-        {
-            "enableRateLimit": True,
-            "options": {"defaultType": "future"},
-            "timeout": 15000,
-        }
-    )
+def okx_get(path, params=None, timeout=12):
+    try:
+        r = requests.get(f"{OKX}{path}", params=params or {}, timeout=timeout, headers={"User-Agent": "Mozilla/5.0"})
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        if str(data.get("code")) != "0":
+            return None
+        return data.get("data")
+    except Exception:
+        return None
 
 
 @st.cache_data(ttl=90)
@@ -73,47 +78,70 @@ def fetch_btc_dominance():
     try:
         r = requests.get("https://api.coingecko.com/api/v3/global", timeout=8)
         r.raise_for_status()
-        data = r.json().get("data", {})
-        return safe_float(data.get("market_cap_percentage", {}).get("btc"), 0.0)
+        return safe_float(r.json().get("data", {}).get("market_cap_percentage", {}).get("btc"), 0.0)
     except Exception:
         return None
 
 
 @st.cache_data(ttl=20)
-def fetch_ticker(symbol):
-    exchange = get_exchange()
-    try:
-        ticker = exchange.fetch_ticker(symbol)
-        return {
-            "last": safe_float(ticker.get("last"), 0.0),
-            "change": safe_float(ticker.get("percentage"), 0.0),
-            "quoteVolume": safe_float(ticker.get("quoteVolume"), 0.0),
-        }
-    except Exception:
+def fetch_ticker(inst_id):
+    data = okx_get("/api/v5/market/ticker", {"instId": inst_id})
+    if not data:
         return {"last": 0.0, "change": 0.0, "quoteVolume": 0.0}
+    row = data[0]
+    last = safe_float(row.get("last"))
+    open24 = safe_float(row.get("open24h"))
+    change = ((last - open24) / open24 * 100) if open24 else 0.0
+    return {
+        "last": last,
+        "change": change,
+        "quoteVolume": safe_float(row.get("volCcy24h")),
+    }
 
 
 @st.cache_data(ttl=25)
-def fetch_ohlcv(symbol, timeframe="15m", limit=180):
-    exchange = get_exchange()
-    try:
-        bars = exchange.fetch_ohlcv(symbol=symbol, timeframe=timeframe, limit=limit)
-        df = pd.DataFrame(bars, columns=["timestamp", "open", "high", "low", "close", "volume"])
-        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
-        df.set_index("timestamp", inplace=True)
-        return df.sort_index()
-    except Exception:
+def fetch_ohlcv(inst_id, timeframe="15m", limit=120):
+    bar = TF_MAP.get(timeframe, timeframe)
+    data = okx_get(
+        "/api/v5/market/candles",
+        {"instId": inst_id, "bar": bar, "limit": str(limit)},
+    )
+    if not data:
         return pd.DataFrame()
+    # OKX: [ts, o, h, l, c, vol, volCcy, volCcyQuote, confirm]
+    rows = []
+    for item in data:
+        rows.append(
+            {
+                "timestamp": pd.to_datetime(int(item[0]), unit="ms", utc=True),
+                "open": safe_float(item[1]),
+                "high": safe_float(item[2]),
+                "low": safe_float(item[3]),
+                "close": safe_float(item[4]),
+                "volume": safe_float(item[5]),
+            }
+        )
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+    df = df.sort_values("timestamp").set_index("timestamp")
+    return df
 
 
 @st.cache_data(ttl=40)
-def fetch_funding(symbol):
-    exchange = get_exchange()
-    try:
-        funding = exchange.fetch_funding_rate(symbol)
-        return safe_float(funding.get("fundingRate"), 0.0) * 100
-    except Exception:
+def fetch_funding(inst_id):
+    data = okx_get("/api/v5/public/funding-rate", {"instId": inst_id})
+    if not data:
         return 0.0
+    return safe_float(data[0].get("fundingRate")) * 100
+
+
+@st.cache_data(ttl=60)
+def fetch_open_interest(inst_id):
+    data = okx_get("/api/v5/public/open-interest", {"instType": "SWAP", "instId": inst_id})
+    if not data:
+        return 0.0
+    return safe_float(data[0].get("oiCcy") or data[0].get("oi"))
 
 
 def _ema(series, length):
@@ -127,16 +155,12 @@ def _rsi(series, length=14):
     avg_gain = gain.ewm(alpha=1 / length, min_periods=length, adjust=False).mean()
     avg_loss = loss.ewm(alpha=1 / length, min_periods=length, adjust=False).mean()
     rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi.fillna(50.0)
+    return (100 - (100 / (1 + rs))).fillna(50.0)
 
 
 def _atr(high, low, close, length=14):
     prev_close = close.shift(1)
-    tr = pd.concat(
-        [(high - low), (high - prev_close).abs(), (low - prev_close).abs()],
-        axis=1,
-    ).max(axis=1)
+    tr = pd.concat([(high - low), (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
     return tr.ewm(alpha=1 / length, min_periods=length, adjust=False).mean()
 
 
@@ -146,19 +170,10 @@ def _adx(high, low, close, length=14):
     plus_dm = up.where((up > down) & (up > 0), 0.0)
     minus_dm = down.where((down > up) & (down > 0), 0.0)
     prev_close = close.shift(1)
-    tr = pd.concat(
-        [(high - low), (high - prev_close).abs(), (low - prev_close).abs()],
-        axis=1,
-    ).max(axis=1)
+    tr = pd.concat([(high - low), (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
     atr = tr.ewm(alpha=1 / length, min_periods=length, adjust=False).mean()
-    plus_di = 100 * (
-        plus_dm.ewm(alpha=1 / length, min_periods=length, adjust=False).mean()
-        / atr.replace(0, np.nan)
-    )
-    minus_di = 100 * (
-        minus_dm.ewm(alpha=1 / length, min_periods=length, adjust=False).mean()
-        / atr.replace(0, np.nan)
-    )
+    plus_di = 100 * (plus_dm.ewm(alpha=1 / length, min_periods=length, adjust=False).mean() / atr.replace(0, np.nan))
+    minus_di = 100 * (minus_dm.ewm(alpha=1 / length, min_periods=length, adjust=False).mean() / atr.replace(0, np.nan))
     dx = (100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)).fillna(0.0)
     return dx.ewm(alpha=1 / length, min_periods=length, adjust=False).mean().fillna(0.0)
 
@@ -188,22 +203,14 @@ def add_indicators(df):
 
 def score_setup(df, mode):
     empty = {
-        "direction": "NEUTRAL",
-        "score": 0.0,
-        "confidence": 0.0,
-        "win_rate": 0.0,
-        "reasons": ["No data"],
-        "price": 0.0,
-        "atr": 0.0,
-        "rsi": 50.0,
-        "regime": "RANGE",
+        "direction": "NEUTRAL", "score": 0.0, "confidence": 0.0, "win_rate": 0.0,
+        "reasons": ["No data"], "price": 0.0, "atr": 0.0, "rsi": 50.0, "regime": "RANGE",
     }
-    if df.empty or len(df) < 60:
+    if df.empty or len(df) < 50:
         return empty
 
     last = df.iloc[-1]
-    bullish = 0.0
-    bearish = 0.0
+    bullish = bearish = 0.0
     reasons = []
 
     ema_9 = safe_float(last.get("ema_9"))
@@ -252,7 +259,7 @@ def score_setup(df, mode):
         bearish += 14 * w["mom"]
         reasons.append("MACD bearish")
 
-    if adx >= 25:
+    if adx >= 22:
         if price > ema_21:
             bullish += 12 * w["trend"]
             reasons.append("ADX trend up")
@@ -261,7 +268,7 @@ def score_setup(df, mode):
             reasons.append("ADX trend down")
 
     if vol_sma > 0:
-        if vol > vol_sma * 1.2:
+        if vol > vol_sma * 1.15:
             bullish += 10 * w["vol"]
             reasons.append("Volume expansion")
         elif vol < vol_sma * 0.75:
@@ -270,7 +277,7 @@ def score_setup(df, mode):
 
     score = max(bullish, bearish) + abs(bullish - bearish) * 0.45
     score = round(min(100.0, score), 1)
-    min_score = MODE_THRESHOLDS.get(mode, 60)
+    min_score = MODE_THRESHOLDS.get(mode, 55)
 
     if bullish > bearish and score >= min_score:
         direction = "LONG"
@@ -279,9 +286,9 @@ def score_setup(df, mode):
     else:
         direction = "NEUTRAL"
 
-    if ema_9 > ema_21 > ema_50 and adx > 25:
+    if ema_9 > ema_21 > ema_50 and adx > 22:
         regime = "TRENDING_UP"
-    elif ema_9 < ema_21 < ema_50 and adx > 25:
+    elif ema_9 < ema_21 < ema_50 and adx > 22:
         regime = "TRENDING_DOWN"
     else:
         regime = "RANGE"
@@ -302,10 +309,10 @@ def score_setup(df, mode):
     }
 
 
-def build_signal(symbol, mode):
+def build_signal(inst_id, mode):
     setups = []
     for tf in ("15m", "1h"):
-        df = fetch_ohlcv(symbol, timeframe=tf, limit=180)
+        df = fetch_ohlcv(inst_id, timeframe=tf, limit=120)
         if df.empty:
             continue
         prepared = add_indicators(df)
@@ -315,21 +322,14 @@ def build_signal(symbol, mode):
 
     if not setups:
         return {
-            "direction": "NEUTRAL",
-            "score": 0.0,
-            "confidence": 0.0,
-            "win_rate": 0.0,
-            "reasons": ["No data"],
-            "timeframes": [],
-            "price": 0.0,
-            "atr": 0.0,
-            "regime": "RANGE",
+            "direction": "NEUTRAL", "score": 0.0, "confidence": 0.0, "win_rate": 0.0,
+            "reasons": ["No data"], "timeframes": [], "price": 0.0, "atr": 0.0, "regime": "RANGE",
         }
 
     avg_score = round(sum(x["score"] for x in setups) / len(setups), 1)
     long_votes = sum(1 for x in setups if x["direction"] == "LONG")
     short_votes = sum(1 for x in setups if x["direction"] == "SHORT")
-    min_score = MODE_THRESHOLDS.get(mode, 60)
+    min_score = MODE_THRESHOLDS.get(mode, 55)
 
     if long_votes >= short_votes and avg_score >= min_score:
         direction = "LONG"
@@ -389,12 +389,9 @@ def save_trade_to_journal(symbol, direction, entry, exit_price, result, notes, m
 def build_learning_profile(journal_df):
     if journal_df is None or journal_df.empty:
         return {
-            "direction_bias": {},
-            "mode_bias": {},
-            "symbol_bias": {},
-            "summary": "Sem trades no journal ainda. O scanner aprende automaticamente a medida que gravar resultados.",
+            "direction_bias": {}, "mode_bias": {}, "symbol_bias": {},
+            "summary": "Sem trades no journal ainda. O scanner aprende automaticamente.",
         }
-
     df = journal_df.copy()
     df["direction"] = df["direction"].astype(str).str.upper()
     df["mode"] = df["mode"].astype(str).str.title().replace("", "Challenge")
@@ -447,11 +444,8 @@ def build_learning_profile(journal_df):
 def apply_learning(score, symbol, mode, direction, profile):
     d_m = safe_float(profile["direction_bias"].get(direction, {}).get("multiplier", 1.0), 1.0)
     m_m = safe_float(profile["mode_bias"].get(mode, {}).get("multiplier", 1.0), 1.0)
-    key1 = symbol.upper().replace("/USDT", "")
-    key2 = symbol.upper()
-    s_m = safe_float(profile["symbol_bias"].get(key1, {}).get("multiplier", 1.0), 1.0)
-    if s_m == 1.0:
-        s_m = safe_float(profile["symbol_bias"].get(key2, {}).get("multiplier", 1.0), 1.0)
+    key = symbol.upper().replace("-USDT-SWAP", "").replace("/USDT", "")
+    s_m = safe_float(profile["symbol_bias"].get(key, {}).get("multiplier", 1.0), 1.0)
     adjusted = clamp(round(score * d_m * m_m * s_m, 1), 0.0, 100.0)
     return adjusted, f"x{d_m:.2f} dir x{m_m:.2f} mode x{s_m:.2f} pair"
 
@@ -470,30 +464,28 @@ def calculate_position_size(price, atr, account_size, risk_pct):
     return round(risk_amount / stop_distance, 4)
 
 
-def get_scan_pairs(cfg):
-    custom = cfg.get("pairs") or []
-    if isinstance(custom, dict):
-        custom = list(custom.keys())
-    if custom:
-        return [p if "/" in str(p) else f"{p}/USDT" for p in custom]
-    return DEFAULT_PAIRS
-
-
-@st.cache_data(ttl=45, show_spinner=False)
-def scan_market(mode, pair_list_key):
-    pairs = pair_list_key.split("|")
+@st.cache_data(ttl=40, show_spinner=False)
+def scan_market(mode, pair_key):
+    pairs = pair_key.split("|")
     rows = []
-    errors = 0
-    for symbol in pairs:
+    ok = 0
+    empty = 0
+    for inst_id in pairs:
         try:
-            signal = build_signal(symbol, mode)
+            signal = build_signal(inst_id, mode)
             if signal["direction"] == "NEUTRAL":
+                # still count data health
+                if signal["price"] <= 0 and "No data" in signal["reasons"]:
+                    empty += 1
                 continue
-            ticker = fetch_ticker(symbol)
-            funding = fetch_funding(symbol)
+            ticker = fetch_ticker(inst_id)
+            funding = fetch_funding(inst_id)
+            oi = fetch_open_interest(inst_id)
+            ok += 1
             rows.append(
                 {
-                    "Symbol": symbol.replace("/USDT", ""),
+                    "Symbol": display_symbol(inst_id),
+                    "Inst": inst_id,
                     "Direction": signal["direction"],
                     "Score": signal["score"],
                     "Confidence": signal["confidence"],
@@ -502,6 +494,7 @@ def scan_market(mode, pair_list_key):
                     "24h %": ticker.get("change", 0.0),
                     "Volume": ticker.get("quoteVolume", 0.0),
                     "Funding %": funding,
+                    "OI": oi,
                     "Reasons": " | ".join(signal["reasons"]),
                     "Timeframes": ", ".join(signal["timeframes"]),
                     "Regime": signal.get("regime", "RANGE"),
@@ -509,44 +502,37 @@ def scan_market(mode, pair_list_key):
                 }
             )
         except Exception:
-            errors += 1
+            empty += 1
             continue
     rows = sorted(rows, key=lambda x: x["Score"], reverse=True)
-    return rows, errors, len(pairs)
+    return rows, ok, empty, len(pairs)
 
 
 # --------------- UI ---------------
 st.title("Bitfunded Signal Scanner Pro")
-st.caption("Scanner de futuros USDT para challenges Bitfunded | execucao manual | learning automatico")
+st.caption("Dados via OKX public API | execucao manual | learning automatico | pensado para Bitfunded")
 
 if "account_size" not in st.session_state:
     st.session_state.account_size = float(config.get("account_size", 10000))
 if "risk_pct" not in st.session_state:
     st.session_state.risk_pct = float(config.get("risk_per_trade_pct", 0.75))
 if "mode" not in st.session_state:
-    st.session_state.mode = "Challenge"
+    st.session_state.mode = "Scalp"
 
 ctrl1, ctrl2, ctrl3, ctrl4 = st.columns([1.2, 1, 1.2, 1])
 with ctrl1:
     st.session_state.account_size = st.number_input(
-        "Account size ($)",
-        min_value=1000.0,
-        max_value=500000.0,
-        value=float(st.session_state.account_size),
-        step=1000.0,
+        "Account size ($)", min_value=1000.0, max_value=500000.0,
+        value=float(st.session_state.account_size), step=1000.0,
     )
 with ctrl2:
     st.session_state.risk_pct = st.number_input(
-        "Risk / trade (%)",
-        min_value=0.25,
-        max_value=2.0,
-        value=float(st.session_state.risk_pct),
-        step=0.25,
+        "Risk / trade (%)", min_value=0.25, max_value=2.0,
+        value=float(st.session_state.risk_pct), step=0.25,
     )
 with ctrl3:
     st.session_state.mode = st.selectbox(
-        "Trade mode",
-        ["Scalp", "Swing", "Challenge"],
+        "Trade mode", ["Scalp", "Swing", "Challenge"],
         index=["Scalp", "Swing", "Challenge"].index(st.session_state.mode),
     )
 with ctrl4:
@@ -565,6 +551,13 @@ m2.metric("Risk / trade", f"{st.session_state.risk_pct}%")
 m3.metric("Daily loss cap", f"{config.get('daily_loss_limit_pct', 4.0)}%")
 m4.metric("BTC Dominance", f"{btc_dom:.1f}%" if btc_dom is not None else "N/A")
 
+# Quick data health check
+probe = fetch_ticker("BTC-USDT-SWAP")
+if probe.get("last", 0) > 0:
+    st.success(f"API OKX online 路 BTC 鈮� ${probe['last']:,.1f} ({probe['change']:+.2f}% 24h)")
+else:
+    st.error("API de mercado indisponivel neste momento. Tenta Refresh daqui a 30s.")
+
 with st.expander("Challenge rules & settings", expanded=False):
     st.markdown(
         f"""
@@ -572,29 +565,21 @@ with st.expander("Challenge rules & settings", expanded=False):
 - Min hold: **{config.get('min_hold_minutes', 12)} min**
 - Daily loss cap: **{config.get('daily_loss_limit_pct', 4.0)}%**
 - Hard max loss: **{config.get('max_loss_limit_pct', 6.0)}%**
-- Mode threshold (score minimo): **{MODE_THRESHOLDS[st.session_state.mode]}**
-- Pares no scan: top 30 liquidos (rapido e estavel no Streamlit Cloud)
+- Mode threshold: **{MODE_THRESHOLDS[st.session_state.mode]}**
+- Fonte de dados: **OKX USDT-SWAP** (public API)
         """
     )
 
 journal_df = load_journal()
 learning = build_learning_profile(journal_df)
+pair_key = "|".join(DEFAULT_PAIRS)
 
-pairs = get_scan_pairs(config)
-pair_key = "|".join(pairs)
-
-with st.spinner(f"A escanear {len(pairs)} pares em modo {st.session_state.mode}..."):
-    results, scan_errors, total = scan_market(st.session_state.mode, pair_key)
+with st.spinner(f"A escanear {len(DEFAULT_PAIRS)} pares OKX em modo {st.session_state.mode}..."):
+    results, ok_count, empty_count, total = scan_market(st.session_state.mode, pair_key)
 
 adjusted_rows = []
 for row in results:
-    adj, note = apply_learning(
-        row["Score"],
-        row["Symbol"],
-        st.session_state.mode,
-        row["Direction"],
-        learning,
-    )
+    adj, note = apply_learning(row["Score"], row["Symbol"], st.session_state.mode, row["Direction"], learning)
     row = dict(row)
     row["Score base"] = row["Score"]
     row["Score"] = adj
@@ -605,89 +590,94 @@ adjusted_rows = sorted(adjusted_rows, key=lambda x: x["Score"], reverse=True)
 min_score = MODE_THRESHOLDS[st.session_state.mode]
 adjusted_rows = [r for r in adjusted_rows if r["Score"] >= min_score]
 
-st.caption(f"Scan: {total} pares | {len(adjusted_rows)} setups | erros API: {scan_errors} | {learning['summary']}")
+st.caption(
+    f"Scan: {total} pares | {len(adjusted_rows)} setups | dados OK: {ok_count} | sem data: {empty_count} | {learning['summary']}"
+)
 
 if adjusted_rows:
     df = pd.DataFrame(adjusted_rows)
     show_cols = [
         "Symbol", "Direction", "Score", "Score base", "Confidence", "Win Rate",
-        "Price", "24h %", "Funding %", "Regime", "Timeframes", "Reasons", "Learning",
+        "Price", "24h %", "Funding %", "OI", "Regime", "Timeframes", "Reasons", "Learning",
     ]
     show_cols = [c for c in show_cols if c in df.columns]
-
     st.dataframe(
         df[show_cols],
         use_container_width=True,
         hide_index=True,
         column_config={
             "Score": st.column_config.ProgressColumn("Score", min_value=0, max_value=100, format="%.1f"),
-            "Score base": st.column_config.NumberColumn("Base", format="%.1f"),
             "Confidence": st.column_config.ProgressColumn("Conf %", min_value=0, max_value=100, format="%.1f"),
             "Win Rate": st.column_config.NumberColumn("WR %", format="%.1f"),
             "Price": st.column_config.NumberColumn(format="%.6g"),
             "24h %": st.column_config.NumberColumn(format="%.2f"),
             "Funding %": st.column_config.NumberColumn(format="%.4f"),
+            "OI": st.column_config.NumberColumn(format="%.2f"),
         },
     )
 
     symbols = df["Symbol"].tolist()
     selected = st.selectbox("Detalhe do setup", symbols)
-    full_symbol = f"{selected}/USDT"
     row = df[df["Symbol"] == selected].iloc[0]
+    inst_id = row["Inst"]
 
     tf = st.radio("Timeframe do grafico", ["15m", "1h"], horizontal=True)
-    chart_df = fetch_ohlcv(full_symbol, timeframe=tf, limit=180)
+    chart_df = fetch_ohlcv(inst_id, timeframe=tf, limit=120)
     if not chart_df.empty:
         chart_df = add_indicators(chart_df)
         fig = go.Figure()
-        fig.add_trace(
-            go.Candlestick(
-                x=chart_df.index,
-                open=chart_df["open"],
-                high=chart_df["high"],
-                low=chart_df["low"],
-                close=chart_df["close"],
-                name=selected,
-            )
-        )
+        fig.add_trace(go.Candlestick(
+            x=chart_df.index, open=chart_df["open"], high=chart_df["high"],
+            low=chart_df["low"], close=chart_df["close"], name=selected,
+        ))
         fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df["ema_9"], mode="lines", name="EMA 9", line=dict(width=1)))
         fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df["ema_21"], mode="lines", name="EMA 21", line=dict(width=1)))
         fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df["ema_50"], mode="lines", name="EMA 50", line=dict(width=1)))
         fig.update_layout(
-            title=f"{selected} | {tf}",
-            xaxis_rangeslider_visible=False,
-            height=420,
-            margin=dict(l=10, r=10, t=40, b=10),
-            template="plotly_dark",
+            title=f"{selected} | {tf} | OKX",
+            xaxis_rangeslider_visible=False, height=420,
+            margin=dict(l=10, r=10, t=40, b=10), template="plotly_dark",
         )
         st.plotly_chart(fig, use_container_width=True)
+
+        # Simple OI / funding context panel (proxy for heat context)
+        st.subheader("Contexto de alavancagem (proxy)")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Open Interest", f"{safe_float(row.get('OI')):,.2f}")
+        c2.metric("Funding %", f"{safe_float(row.get('Funding %')):.4f}%")
+        c3.metric("Regime", str(row.get("Regime")))
+        st.caption(
+            "Heatmap de liquidacoes real (Coinglass etc.) precisa de API paga. "
+            "Aqui usamos OI + funding como contexto de alavancagem."
+        )
+    else:
+        st.warning("Sem candles para este par neste momento.")
 
     price = safe_float(row.get("Price"))
     atr = safe_float(row.get("ATR"))
     if atr <= 0 and price > 0:
         atr = price * 0.008
-    size = calculate_position_size(
-        price, atr, st.session_state.account_size, st.session_state.risk_pct
-    )
+    size = calculate_position_size(price, atr, st.session_state.account_size, st.session_state.risk_pct)
     st.info(
-        f"**{row['Direction']} {selected}** | Score {row['Score']} (base {row.get('Score base', row['Score'])}) | "
+        f"**{row['Direction']} {selected}** | Score {row['Score']} (base {row.get('Score base')}) | "
         f"Conf {row['Confidence']}% | WR est. {row['Win Rate']}% | "
-        f"Tamanho sugerido ~ **{size}** unidades | Risk {st.session_state.risk_pct}% de ${st.session_state.account_size:,.0f}"
+        f"Tamanho sugerido ~ **{size}** | Risk {st.session_state.risk_pct}% de ${st.session_state.account_size:,.0f}"
     )
 else:
     st.warning(
         "Nenhum setup forte neste momento. "
-        "Tenta **Scalp** (threshold mais baixo), clica **Refresh scan**, ou espera mais volatilidade."
+        "Tenta **Scalp**, clica **Refresh scan**, ou espera mais volatilidade. "
+        f"(dados OK: {ok_count}, sem data: {empty_count})"
     )
 
 st.divider()
 st.subheader("Journal + auto-learning")
-st.caption("Grava o resultado real de cada trade. O scanner ajusta sozinho o ranking (direcao, modo e simbolo).")
+st.caption("Grava o resultado real de cada trade. O scanner ajusta o ranking sozinho.")
 
 with st.form("journal_form", clear_on_submit=True):
     c1, c2, c3, c4 = st.columns(4)
     with c1:
-        j_symbol = st.text_input("Symbol", value="BTC/USDT")
+        j_symbol = st.text_input("Symbol", value="BTC")
     with c2:
         j_dir = st.selectbox("Direction", ["LONG", "SHORT"])
     with c3:
@@ -696,21 +686,18 @@ with st.form("journal_form", clear_on_submit=True):
         j_exit = st.number_input("Exit", value=0.0, format="%.6f")
     c5, c6, c7 = st.columns(3)
     with c5:
-        j_result = st.number_input("Result %", value=0.0, format="%.2f", help="Lucro/prejuizo em % (ex: 1.5 ou -0.8)")
+        j_result = st.number_input("Result %", value=0.0, format="%.2f")
     with c6:
         j_mode = st.selectbox(
-            "Mode",
-            ["Scalp", "Swing", "Challenge"],
+            "Mode", ["Scalp", "Swing", "Challenge"],
             index=["Scalp", "Swing", "Challenge"].index(st.session_state.mode),
         )
     with c7:
         j_notes = st.text_input("Notes", value="")
     if st.form_submit_button("Guardar trade"):
         if j_symbol.strip():
-            save_trade_to_journal(
-                j_symbol.strip(), j_dir, j_entry, j_exit, j_result, j_notes, j_mode
-            )
-            st.success(f"Trade guardado: {j_symbol} | learning atualizado.")
+            save_trade_to_journal(j_symbol.strip(), j_dir, j_entry, j_exit, j_result, j_notes, j_mode)
+            st.success(f"Trade guardado: {j_symbol}")
             st.rerun()
 
 journal_df = load_journal()
@@ -718,38 +705,18 @@ if not journal_df.empty:
     st.dataframe(journal_df.tail(15), use_container_width=True, hide_index=True)
     learning = build_learning_profile(journal_df)
     st.write(learning["summary"])
-    lc1, lc2 = st.columns(2)
-    with lc1:
-        if learning["direction_bias"]:
-            st.markdown("**Performance por direcao**")
-            st.dataframe(
-                pd.DataFrame.from_dict(learning["direction_bias"], orient="index"),
-                use_container_width=True,
-            )
-    with lc2:
-        if learning["symbol_bias"]:
-            st.markdown("**Top simbolos (avg result %)**")
-            sym_df = (
-                pd.DataFrame.from_dict(learning["symbol_bias"], orient="index")
-                .reset_index()
-                .rename(columns={"index": "Symbol"})
-                .sort_values("avg_result", ascending=False)
-                .head(10)
-            )
-            st.dataframe(sym_df, use_container_width=True, hide_index=True)
 else:
     st.caption("Ainda sem trades no journal.")
 
 st.divider()
 st.markdown(
     """
-**Como usar em challenge Bitfunded**
-1. Escolhe o **modo** (Challenge = mais seletivo).
-2. Ajusta **account size** e **risk** aos teus numeros reais.
-3. So entra em setups com score alto e razoes claras.
-4. Depois de cada trade, grava o **Result %** 鈥� o learning ajusta o ranking sozinho.
-5. Respeita daily loss e max loss da challenge.
+**Bitfunded tips**
+1. Usa **Scalp** para mais setups; **Challenge** para filtrar so os melhores.
+2. Ajusta account size e risk aos valores reais da challenge.
+3. Grava sempre o Result % 鈥� o learning melhora o ranking.
+4. Dados via **OKX** (a Binance bloqueia muitos servidores cloud).
 
-*Ferramenta de suporte a decisao. Nao executa ordens e nao garante resultados.*
+*Suporte a decisao. Nao executa ordens. Nao garante lucro.*
 """
 )
