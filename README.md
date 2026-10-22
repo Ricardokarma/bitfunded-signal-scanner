@@ -12,7 +12,6 @@ import yaml
 
 st.set_page_config(page_title="Bitfunded Signal Scanner Pro", page_icon="📈", layout="wide")
 
-
 JOURNAL_PATH = "trades_journal.csv"
 
 
@@ -31,6 +30,41 @@ def get_exchange():
         "enableRateLimit": True,
         "options": {"defaultType": "future"},
     })
+
+
+@st.cache_data(ttl=120)
+def get_all_active_usdt_pairs():
+    exchange = get_exchange()
+    try:
+        markets = exchange.load_markets()
+    except Exception:
+        return []
+
+    valid = []
+    for symbol, market in markets.items():
+        if not market.get("active", False):
+            continue
+        if market.get("settle") != "USDT":
+            continue
+        if market.get("quote") != "USDT":
+            continue
+        if market.get("type") != "future":
+            continue
+        if symbol.endswith(("/USDT", "USDT")):
+            pass
+        if "/USDT" in symbol and not symbol.startswith(("BTC/USDT", "ETH/USDT")):
+            valid.append(symbol)
+        if symbol in ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT", "DOGE/USDT", "ADA/USDT", "AVAX/USDT", "LINK/USDT", "SUI/USDT"]:
+            valid.append(symbol)
+
+    seen = set()
+    cleaned = []
+    for s in valid:
+        if s not in seen:
+            seen.add(s)
+            cleaned.append(s)
+    cleaned.sort()
+    return cleaned
 
 
 def safe_float(value, default=0.0):
@@ -101,7 +135,8 @@ def fetch_funding_and_oi(symbol):
     try:
         long_short = exchange.fetch_long_short_ratio(symbol=symbol)
         if isinstance(long_short, dict):
-            result["longShortRatio"] = safe_float(list(long_short.values())[0], 0.0)
+            ratio = next(iter(long_short.values()), 0.0)
+            result["longShortRatio"] = safe_float(ratio, 0.0)
     except Exception:
         pass
 
@@ -240,7 +275,6 @@ def score_setup(df):
 
     score = max(bullish_score, bearish_score) + abs(bullish_score - bearish_score) * 0.5
     score = round(min(100.0, score), 1)
-
     regime = compute_regime(df)
 
     if bullish_score > bearish_score and score >= 55:
@@ -286,7 +320,7 @@ def calculate_position_size(price, atr, account_size, risk_pct):
 
 
 def build_signal_for_symbol(symbol):
-    timeframes = config.get("timeframes", ["15m", "1h"])
+    timeframes = ["15m", "1h"]
     viewed = []
     for timeframe in timeframes:
         df = fetch_ohlcv(symbol, timeframe=timeframe, limit=220)
@@ -333,12 +367,14 @@ def build_signal_for_symbol(symbol):
 
 @st.cache_data(ttl=30)
 def scan_market():
-    pair_list = config.get("pairs", [])
-    if isinstance(pair_list, dict):
-        pair_list = list(pair_list.keys())
-
     rows = []
-    for symbol in pair_list:
+    market_pairs = get_all_active_usdt_pairs()
+    if not market_pairs:
+        market_pairs = config.get("pairs", [])
+        if isinstance(market_pairs, dict):
+            market_pairs = list(market_pairs.keys())
+
+    for symbol in market_pairs:
         signal = build_signal_for_symbol(symbol)
         if signal["direction"] == "NEUTRAL":
             continue
@@ -389,7 +425,7 @@ def save_trade_to_journal(symbol, direction, entry, exit_price, result, notes):
 
 
 st.title("📈 Bitfunded Signal Scanner Pro")
-st.caption("Advanced market scanner built for manual execution, risk discipline, and Bitfunded challenge consistency.")
+st.caption("Dynamic futures scanner with market-wide filtering, confidence scoring, and trade journaling.")
 
 btc_dom = fetch_btc_dominance()
 
@@ -428,7 +464,7 @@ results = scan_market()
 
 if results:
     df = pd.DataFrame(results)
-    st.subheader("Ranked market opportunities")
+    st.subheader("Dynamic market watchlist")
     st.dataframe(
         df,
         use_container_width=True,
@@ -444,7 +480,7 @@ if results:
 
     selected_symbol = st.selectbox("Inspect symbol", df["Symbol"].unique())
     symbol = f"{selected_symbol}/USDT"
-    selected_tf = st.selectbox("Timeframe", config.get("timeframes", ["15m"]))
+    selected_tf = st.selectbox("Timeframe", ["15m", "1h"])
 
     chart_df = fetch_ohlcv(symbol, timeframe=selected_tf, limit=220)
     if not chart_df.empty:
@@ -466,16 +502,15 @@ if results:
         fig.update_layout(title=f"{symbol} {selected_tf}", xaxis_rangeslider_visible=False)
         st.plotly_chart(fig, use_container_width=True)
 
-    market_row = df[df["Symbol"] == selected_symbol].iloc[0]
-    ticker = fetch_ticker(symbol)
-    price = safe_float(ticker.get("last"))
-    atr_pct = 0.6
-    size = calculate_position_size(price, price * (atr_pct / 100), config.get("account_size", 10000), config.get("risk_per_trade_pct", 0.75))
+    row = df[df["Symbol"] == selected_symbol].iloc[0]
+    price = safe_float(row.get("Price"))
+    atr_pct = 0.65
+    position_size = calculate_position_size(price, price * (atr_pct / 100), config.get("account_size", 10000), config.get("risk_per_trade_pct", 0.75))
     st.info(
-        f"Setup: {market_row['Direction']} | Score {market_row['Score']} | Confidence {market_row['Confidence']}% | Estimated win rate {market_row['Win Rate']}% | Suggested size ~ {size} units"
+        f"Setup: {row['Direction']} | Score {row['Score']} | Confidence {row['Confidence']}% | Expected win rate {row['Win Rate']}% | Suggested size {position_size} units"
     )
 else:
-    st.warning("No strong candidates found. The market is quiet or the setup quality is below the active threshold.")
+    st.warning("No strong candidates found. The market is quiet or the score threshold is too strict for current conditions.")
 
 st.divider()
 
@@ -519,24 +554,23 @@ else:
 
 st.divider()
 
-st.subheader("What makes this stronger")
 st.markdown(
     """
-    - Multi-timeframe confirmation across higher-quality setups
-    - Strict risk limits by challenge rules
-    - Confidence and expected win-rate estimation
-    - Manual journal for actual outcome tracking
-    - Better filtering so the app prioritizes quality over quantity
-    - Trade modes: scalp, swing, challenge
+    ### Better reliability recommendations
+    - Keep the market scan wide, but only trade the strongest-ranked setups
+    - Use multi-timeframe confirmation before executing
+    - Respect challenge risk limits strictly
+    - Track actual outcomes to improve the model over time
+    - Reduce exposure when BTC dominance or funding conditions are hostile
+    - Separate scalp, swing, and challenge execution
     """
 )
 
-st.info("This tool is designed to support manual execution, not to guarantee future profit. It helps you filter market conditions, manage risk, and improve decision quality over time.")
-
+st.info("This app helps you scan the full active futures market, rank only the strongest setups, and manage risk with manual execution discipline. It does not guarantee profit or future outcomes.")
 
 if mode == "Scalp":
-    st.caption("Scalp mode: focus on fast momentum, strong volume, clean trend, minimal noise, and small risk per trade.")
+    st.caption("Scalp mode: prioritize fast momentum, clean trend, volume confirmation, and small risk per trade.")
 elif mode == "Swing":
-    st.caption("Swing mode: focus on trend quality, multi-timeframe confirmation, and stronger trade persistence.")
+    st.caption("Swing mode: favor stronger trend behavior, multi-timeframe confirmation, and better persistence.")
 else:
-    st.caption("Challenge mode: prioritize risk discipline, max positions, daily loss limits, and only the highest-quality entries.")
+    st.caption("Challenge mode: prioritize risk discipline, low exposure, and only the best-quality setups.")
