@@ -2,12 +2,13 @@ import os
 from datetime import datetime
 
 import ccxt
+import pandas as pd
 import plotly.graph_objects as go
 import requests
 import streamlit as st
 import yaml
 
-st.set_page_config(page_title="Bitfunded Signal Scanner Pro", page_icon="📈", layout="wide")
+st.set_page_config(page_title="Bitfunded Signal Scanner Pro", page_icon="ðŸ“ˆ", layout="wide")
 
 JOURNAL_PATH = "trades_journal.csv"
 
@@ -148,23 +149,90 @@ def fetch_funding_and_oi(symbol):
     return result
 
 
+def _ema(series, length):
+    return series.ewm(span=length, adjust=False).mean()
+
+
+def _rsi(series, length=14):
+    delta = series.diff()
+    gain = delta.clip(lower=0.0)
+    loss = -delta.clip(upper=0.0)
+    avg_gain = gain.ewm(alpha=1 / length, min_periods=length, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1 / length, min_periods=length, adjust=False).mean()
+    rs = avg_gain / avg_loss.replace(0, pd.NA)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.fillna(50.0)
+
+
+def _atr(high, low, close, length=14):
+    prev_close = close.shift(1)
+    tr = pd.concat(
+        [
+            (high - low),
+            (high - prev_close).abs(),
+            (low - prev_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+    return tr.ewm(alpha=1 / length, min_periods=length, adjust=False).mean()
+
+
+def _adx(high, low, close, length=14):
+    up = high.diff()
+    down = -low.diff()
+    plus_dm = up.where((up > down) & (up > 0), 0.0)
+    minus_dm = down.where((down > up) & (down > 0), 0.0)
+    prev_close = close.shift(1)
+    tr = pd.concat(
+        [
+            (high - low),
+            (high - prev_close).abs(),
+            (low - prev_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+    atr = tr.ewm(alpha=1 / length, min_periods=length, adjust=False).mean()
+    plus_di = 100 * (
+        plus_dm.ewm(alpha=1 / length, min_periods=length, adjust=False).mean()
+        / atr.replace(0, pd.NA)
+    )
+    minus_di = 100 * (
+        minus_dm.ewm(alpha=1 / length, min_periods=length, adjust=False).mean()
+        / atr.replace(0, pd.NA)
+    )
+    dx = (
+        100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, pd.NA)
+    ).fillna(0.0)
+    adx = dx.ewm(alpha=1 / length, min_periods=length, adjust=False).mean()
+    return adx.fillna(0.0)
+
+
+def _macd(series, fast=12, slow=26, signal=9):
+    ema_fast = _ema(series, fast)
+    ema_slow = _ema(series, slow)
+    macd_line = ema_fast - ema_slow
+    signal_line = _ema(macd_line, signal)
+    hist = macd_line - signal_line
+    return macd_line, signal_line, hist
+
+
 def add_indicators(df):
     if df.empty:
         return df
 
     out = df.copy()
-    out["ema_9"] = ta.ema(out["close"], length=9)
-    out["ema_21"] = ta.ema(out["close"], length=21)
-    out["ema_50"] = ta.ema(out["close"], length=50)
-    out["rsi"] = ta.rsi(out["close"], length=14)
-    out["atr"] = ta.atr(out["high"], out["low"], out["close"], length=14)
-    out["adx"] = ta.adx(out["high"], out["low"], out["close"], length=14)
+    out["ema_9"] = _ema(out["close"], 9)
+    out["ema_21"] = _ema(out["close"], 21)
+    out["ema_50"] = _ema(out["close"], 50)
+    out["rsi"] = _rsi(out["close"], 14)
+    out["atr"] = _atr(out["high"], out["low"], out["close"], 14)
+    out["adx"] = _adx(out["high"], out["low"], out["close"], 14)
     out["volume_sma"] = out["volume"].rolling(window=20).mean()
 
-    macd = ta.macd(out["close"], fast=12, slow=26, signal=9)
-    if isinstance(macd, pd.DataFrame):
-        for column in macd.columns:
-            out[column] = macd[column]
+    macd_line, signal_line, hist = _macd(out["close"], 12, 26, 9)
+    out["MACD_12_26_9"] = macd_line
+    out["MACDs_12_26_9"] = signal_line
+    out["MACDh_12_26_9"] = hist
 
     return out
 
@@ -400,7 +468,7 @@ def scan_market():
                 "Volume": ticker.get("quoteVolume", 0.0),
                 "Funding %": funding.get("fundingRate", 0.0),
                 "OI": funding.get("openInterest", 0.0),
-                "Reasons": " • ".join(signal["reasons"]),
+                "Reasons": " â€¢ ".join(signal["reasons"]),
                 "Timeframes": ", ".join(signal["timeframes"]),
             }
         )
@@ -429,7 +497,7 @@ def save_trade_to_journal(symbol, direction, entry, exit_price, result, notes):
     df.to_csv(JOURNAL_PATH, index=False)
 
 
-st.title("📈 Bitfunded Signal Scanner Pro")
+st.title("ðŸ“ˆ Bitfunded Signal Scanner Pro")
 st.caption("Dynamic futures scanner built for scalp, swing, and challenge-style market selection.")
 
 btc_dom = fetch_btc_dominance()
@@ -584,4 +652,3 @@ elif mode == "Swing":
     st.caption("Swing mode: favor stronger trend behavior and multi-timeframe confirmation for higher-quality persistence.")
 else:
     st.caption("Challenge mode: prioritize risk discipline, controlled exposure, and only the strongest setups.")
-
